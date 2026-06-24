@@ -1,6 +1,6 @@
-﻿"use client";
+"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -92,6 +92,7 @@ type Product = {
 
 type WarehouseRecord = {
   id: string;
+  dbId?: string;
   name: string;
   type: "factory" | "warehouse" | "transit";
 };
@@ -205,262 +206,34 @@ type AppState = {
   registry: Carton[];
 };
 
-const storageKey = "mrmakhana-wms-state-v1";
 const sessionUserKey = "mrmakhana-wms-user";
 function now() {
   return new Date().toISOString();
 }
 
-function uid(prefix: string) {
-  return `${prefix}-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`;
+function uid(...parts: string[]) {
+  void parts;
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function generateBarcode(product: Product, batch: string, cartonNo: string) {
   return buildBarcodeFromTemplate(product, batch, cartonNo);
 }
 
-function seedState(): AppState {
-  const warehouses: WarehouseRecord[] = [
-    { id: "factory", name: "Factory", type: "factory" },
-    { id: "delhi", name: "Delhi Warehouse", type: "warehouse" },
-    { id: "mumbai", name: "Mumbai Warehouse", type: "warehouse" },
-    { id: "transit", name: "In Transit", type: "transit" },
-  ];
-
-  const users: User[] = [
-    { id: "u-admin", name: "Admin", email: "admin@mrmakhana.test", password: "Admin@123", role: "Admin", warehouseId: "factory" },
-    { id: "u-accountant", name: "Accountant", email: "accountant@mrmakhana.test", password: "Account@123", role: "Accountant", warehouseId: "factory" },
-    { id: "u-manager", name: "Warehouse Manager", email: "manager@mrmakhana.test", password: "Manager@123", role: "Warehouse Manager", warehouseId: "delhi" },
-    { id: "u-operator", name: "Operator", email: "operator@mrmakhana.test", password: "Operator@123", role: "Operator", warehouseId: "delhi" },
-    { id: "u-viewer", name: "Viewer", email: "viewer@mrmakhana.test", password: "Viewer@123", role: "Viewer", warehouseId: "delhi" },
-  ];
-
-  const products: Product[] = [
-    {
-      id: "p-peri",
-      name: "Mr Makhana Roasted Makhana",
-      category: "Fox Nuts",
-      sku: "MM-PERI-72",
-      gtin: "890800100001",
-      prefix: "MM",
-      flavour: "Peri Peri",
-      weight: "70G",
-      mrp: 99,
-      caseQty: 72,
-      qtyUnit: "pcs",
-      variantCode: "PP",
-      shelfLifeDays: 180,
-      hsn: "190410",
-      status: "Active",
-      template: "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}",
-      dataOrigin: "demo",
-    },
-    {
-      id: "p-cheese",
-      name: "Mr Makhana Roasted Makhana",
-      category: "Fox Nuts",
-      sku: "MM-CHEESE-48",
-      gtin: "890800100002",
-      prefix: "MM",
-      flavour: "Cheese",
-      weight: "60G",
-      mrp: 89,
-      caseQty: 48,
-      qtyUnit: "pc",
-      variantCode: "CH",
-      shelfLifeDays: 180,
-      hsn: "190410",
-      status: "Active",
-      template: "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}",
-      dataOrigin: "demo",
-    },
-  ];
-
-  const cartons: Carton[] = [];
-  products.forEach((product, productIndex) => {
-    for (let i = 1; i <= 14; i += 1) {
-      const cartonNo = String(i).padStart(5, "0");
-      const mfd = productIndex === 0 ? "2026-05-01" : "2026-04-15";
-      const expiry = productIndex === 0 ? "2026-10-28" : "2026-10-12";
-      cartons.push({
-        id: `${product.id}-${cartonNo}`,
-        barcode: generateBarcode(product, "B2606A", cartonNo),
-        productId: product.id,
-        sku: product.sku,
-        gtin: product.gtin,
-        flavour: product.flavour,
-        weight: product.weight,
-        mrp: product.mrp,
-        qty: product.caseQty,
-        qtyUnit: product.qtyUnit,
-        batch: "B2606A",
-        mfd,
-        expiry,
-        cartonNo,
-        warehouseId: i <= 7 ? "factory" : "delhi",
-        status: i <= 7 ? "IN_FACTORY" : "RECEIVED_AT_WAREHOUSE",
-        dataOrigin: "demo",
-      });
-    }
-  });
-  cartons[4].status = "DAMAGED";
-  cartons[4].blockedReason = "Corner crushed during pallet movement";
-  cartons[18].status = "EXPIRED";
-  cartons[18].expiry = "2026-01-15";
-
-  const sampleDispatch = cartons.slice(0, 3).map((carton) => carton.barcode);
-  cartons.slice(0, 3).forEach((carton) => {
-    carton.status = "IN_TRANSIT";
-    carton.warehouseId = "transit";
-  });
-  const sessions: ScanSession[] = [
-    {
-      id: "ses-sample-dispatch",
-      type: "Factory Dispatch",
-      sourceWarehouseId: "factory",
-      destinationWarehouseId: "delhi",
-      vehicle: "DL01AB1234",
-      driver: "Ramesh",
-      lr: "LR-1024",
-      transporter: "North Line Logistics",
-      createdBy: "u-admin",
-      createdAt: now(),
-      updatedAt: now(),
-      scanned: sampleDispatch,
-      finalized: true,
-      dataOrigin: "demo",
-    },
-  ];
-
-  const documents: DocumentRecord[] = [
-    {
-      id: "FD-260624-001",
-      type: "Factory Dispatch Slip",
-      createdAt: now(),
-      createdBy: "u-admin",
-      source: "Factory",
-      destination: "Delhi Warehouse",
-      vehicle: "DL01AB1234",
-      driver: "Ramesh",
-      lr: "LR-1024",
-      transporter: "North Line Logistics",
-      barcodes: sampleDispatch,
-      dataOrigin: "demo",
-    },
-    {
-      id: "VLS-260624-001",
-      type: "Vehicle Loading Slip",
-      createdAt: now(),
-      createdBy: "u-admin",
-      source: "Factory",
-      destination: "Delhi Warehouse",
-      vehicle: "DL01AB1234",
-      driver: "Ramesh",
-      lr: "LR-1024",
-      transporter: "North Line Logistics",
-      barcodes: sampleDispatch,
-      dataOrigin: "demo",
-    },
-    {
-      id: "DMG-260624-001",
-      type: "Damage Report",
-      createdAt: now(),
-      createdBy: "u-manager",
-      source: "Factory",
-      discrepancy: "Corner crushed during pallet movement",
-      barcodes: [cartons[4].barcode],
-      dataOrigin: "demo",
-    },
-    {
-      id: "CYC-260624-001",
-      type: "Cycle Count Report",
-      createdAt: now(),
-      createdBy: "u-manager",
-      source: "Delhi Warehouse",
-      notes: "Seed cycle count matched physical stock.",
-      barcodes: cartons.filter((carton) => carton.warehouseId === "delhi").map((carton) => carton.barcode),
-      dataOrigin: "demo",
-    },
-    {
-      id: "INV-260624-001",
-      type: "Inventory Report",
-      createdAt: now(),
-      createdBy: "u-admin",
-      source: "All Warehouses",
-      barcodes: cartons.map((carton) => carton.barcode),
-      dataOrigin: "demo",
-    },
-    {
-      id: "TRACE-260624-001",
-      type: "Carton Traceability Report",
-      createdAt: now(),
-      createdBy: "u-admin",
-      source: "Factory",
-      destination: "In Transit",
-      barcodes: [sampleDispatch[0]],
-      dataOrigin: "demo",
-    },
-  ];
-
-  const mismatches: MismatchCase[] = [
-    {
-      id: "CASE-260624-001",
-      sessionId: "ses-sample-dispatch",
-      status: "Open",
-      createdAt: now(),
-      missing: [sampleDispatch[2]],
-      extra: ["MMUNKNOWNB2606A70G72pcs99PP99999"],
-      duplicates: [],
-      reason: "Seed mismatch case for receiving investigation workflow.",
-      dataOrigin: "demo",
-    },
-  ];
-
-  const audit: AuditLog[] = documents[0].barcodes.map((barcode) => ({
-    id: uid("audit"),
-    time: now(),
-    userId: "u-admin",
-    role: "Admin",
-    action: "Seed dispatch finalized",
-    barcode,
-    documentRef: "FD-260624-001",
-    oldValue: "IN_FACTORY",
-    newValue: "IN_TRANSIT",
-  }));
-
-  return { settings: { mode: "development", supabaseProjectRef: "yagdnrnfqbqcqgcbejuc" }, users, products, warehouses, cartons, sessions, documents, mismatches, audit, registry: cartons };
-}
-
-function loadState(): AppState {
-  if (typeof window === "undefined") return seedState();
-  const saved = window.localStorage.getItem(storageKey);
-  if (!saved) return seedState();
-  try {
-    return normalizeState(JSON.parse(saved) as AppState);
-  } catch {
-    return seedState();
-  }
-}
-
-function normalizeState(state: AppState): AppState {
-  const seeded = seedState();
+function emptyState(): AppState {
   return {
-    ...seeded,
-    ...state,
-    settings: {
-      mode: state.settings?.mode ?? "development",
-      supabaseProjectRef: state.settings?.supabaseProjectRef ?? "yagdnrnfqbqcqgcbejuc",
-      goLiveAt: state.settings?.goLiveAt,
-    },
-    products: (state.products ?? seeded.products).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
-    cartons: (state.cartons ?? seeded.cartons).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
-    sessions: (state.sessions ?? seeded.sessions).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
-    documents: (state.documents ?? seeded.documents).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
-    mismatches: (state.mismatches ?? seeded.mismatches).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
-    registry: (state.registry ?? state.cartons ?? seeded.registry).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    settings: { mode: "development", supabaseProjectRef: "yagdnrnfqbqcqgcbejuc" },
+    users: [],
+    products: [],
+    warehouses: [],
+    cartons: [],
+    sessions: [],
+    documents: [],
+    mismatches: [],
+    audit: [],
+    registry: [],
   };
 }
-
 function can(user: User, action: "manage" | "sensitive" | "scan" | "view") {
   return canRole(user.role, action);
 }
@@ -552,9 +325,11 @@ function SelectField(props: React.SelectHTMLAttributes<HTMLSelectElement> & { la
 }
 
 export default function Home() {
-  const [state, setState] = useState<AppState>(() => seedState());
+  const [state, setState] = useState<AppState>(() => emptyState());
   const [activeUserId, setActiveUserId] = useState("");
   const [hydrated, setHydrated] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<"loading" | "ready" | "saving" | "error">("loading");
+  const [backendMessage, setBackendMessage] = useState("Loading WMS data from Supabase...");
   const [email, setEmail] = useState("admin@mrmakhana.test");
   const [password, setPassword] = useState("Admin@123");
   const [loginError, setLoginError] = useState("");
@@ -573,18 +348,32 @@ export default function Home() {
   const user = state.users.find((item) => item.id === activeUserId) ?? null;
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setState(loadState());
-      setActiveUserId(window.localStorage.getItem(sessionUserKey) ?? "");
-      setHydrated(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
+    let cancelled = false;
+    fetch("/api/wms", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error((await response.json()).error ?? "Unable to load Supabase WMS data.");
+        return response.json() as Promise<AppState>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const next = { ...data, registry: data.cartons };
+        const storedUserId = window.localStorage.getItem(sessionUserKey) ?? "";
+        setState(next);
+        setActiveUserId(next.users.some((item) => item.id === storedUserId) ? storedUserId : "");
+        setBackendStatus("ready");
+        setBackendMessage("Supabase data loaded.");
+        setHydrated(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setBackendStatus("error");
+        setBackendMessage(error instanceof Error ? error.message : "Unable to load Supabase WMS data.");
+        setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    window.localStorage.setItem(storageKey, JSON.stringify(state));
-  }, [hydrated, state]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -620,6 +409,17 @@ export default function Home() {
   }, []);
 
   const warehouseById = useMemo(() => Object.fromEntries(state.warehouses.map((item) => [item.id, item.name])), [state.warehouses]);
+  const factoryWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "factory")?.id ?? "factory", [state.warehouses]);
+  const transitWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "transit")?.id ?? "transit", [state.warehouses]);
+  const primaryWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse")?.id ?? user?.warehouseId ?? "delhi", [state.warehouses, user?.warehouseId]);
+  const transferWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse" && item.id !== primaryWarehouseId)?.id ?? primaryWarehouseId, [primaryWarehouseId, state.warehouses]);
+  const resolveWarehouseId = useCallback(
+    (value: string) => {
+      const normalized = value.trim().toLowerCase();
+      return state.warehouses.find((item) => item.id.toLowerCase() === normalized || item.name.toLowerCase() === normalized)?.id ?? factoryWarehouseId;
+    },
+    [factoryWarehouseId, state.warehouses],
+  );
   const productById = useMemo(() => Object.fromEntries(state.products.map((item) => [item.id, item])), [state.products]);
   const operationalProducts = useMemo(() => state.products.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.products, state.settings.mode]);
   const operationalCartons = useMemo(() => state.cartons.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.cartons, state.settings.mode]);
@@ -665,10 +465,31 @@ export default function Home() {
     };
   }, [operationalCartons, operationalSessions]);
 
+  const persistState = useCallback((next: AppState) => {
+    setBackendStatus("saving");
+    setBackendMessage("Saving operational data to Supabase...");
+    fetch("/api/wms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...next, registry: next.cartons }),
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error((await response.json()).error ?? "Supabase save failed.");
+        setBackendStatus("ready");
+        setBackendMessage("Operational data saved in Supabase.");
+      })
+      .catch((error) => {
+        setBackendStatus("error");
+        setBackendMessage(error instanceof Error ? error.message : "Supabase save failed.");
+      });
+  }, []);
+
   function mutate(updater: (draft: AppState) => void) {
     setState((current) => {
       const draft: AppState = JSON.parse(JSON.stringify(current));
       updater(draft);
+      draft.registry = draft.cartons;
+      persistState(draft);
       return draft;
     });
   }
@@ -707,8 +528,8 @@ export default function Home() {
   function startSession(type: ScanSession["type"]) {
     if (!user || !can(user, "scan")) return;
     const source = type === "Warehouse Receive" ? sourceSessions.receiving[0] : type === "Transfer In" ? sourceSessions.transferIn[0] : undefined;
-    const sourceWarehouseId = type === "Factory Dispatch" ? "factory" : type === "Warehouse Receive" ? "transit" : type === "Transfer In" ? "transit" : user.warehouseId;
-    const destinationWarehouseId = type === "Factory Dispatch" ? "delhi" : type === "Warehouse Receive" || type === "Transfer In" ? user.warehouseId : type === "Transfer Out" ? "mumbai" : undefined;
+    const sourceWarehouseId = type === "Factory Dispatch" ? factoryWarehouseId : type === "Warehouse Receive" ? transitWarehouseId : type === "Transfer In" ? transitWarehouseId : user.warehouseId;
+    const destinationWarehouseId = type === "Factory Dispatch" ? primaryWarehouseId : type === "Warehouse Receive" || type === "Transfer In" ? user.warehouseId : type === "Transfer Out" ? transferWarehouseId : undefined;
     setSession({
       id: uid("session"),
       type,
@@ -819,7 +640,7 @@ export default function Home() {
         if (!carton) return;
         const oldValue = carton.status;
         carton.status = newStatus[session.type] ?? carton.status;
-        carton.warehouseId = session.type.includes("Dispatch") || session.type === "Transfer Out" ? "transit" : session.destinationWarehouseId ?? carton.warehouseId;
+        carton.warehouseId = session.type.includes("Dispatch") || session.type === "Transfer Out" ? transitWarehouseId : session.destinationWarehouseId ?? carton.warehouseId;
         if (session.type === "Customer Dispatch") carton.customer = session.customer || "Modern Trade Customer";
         draft.audit.unshift({
           id: uid("audit"),
@@ -995,7 +816,7 @@ export default function Home() {
           mfd: String(row.mfd ?? new Date().toISOString().slice(0, 10)),
           expiry: String(row.expiry ?? new Date(new Date().setDate(new Date().getDate() + 180)).toISOString().slice(0, 10)),
           cartonNo: String(row.carton_number ?? parsed.cartonNo),
-          warehouseId: String(row.current_warehouse ?? "factory"),
+          warehouseId: resolveWarehouseId(String(row.current_warehouse ?? factoryWarehouseId)),
           status: "IN_FACTORY",
           dataOrigin: "real",
         });
@@ -1063,7 +884,7 @@ export default function Home() {
         mfd,
         expiry,
         cartonNo,
-        warehouseId: "factory",
+        warehouseId: factoryWarehouseId,
         status: "IN_FACTORY" as Status,
         dataOrigin: "real" as DataOrigin,
       };
@@ -1114,7 +935,7 @@ export default function Home() {
         id: `SMR-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 1).padStart(3, "0")}`,
         type: "Shortage/Mismatch Report",
         createdAt: now(),
-        createdBy: item.sessionId,
+        createdBy: user.id,
         approver: user.id,
         discrepancy: reason,
         barcodes: [...item.missing, ...item.extra],
@@ -1124,7 +945,7 @@ export default function Home() {
         id: `IR-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 1).padStart(3, "0")}`,
         type: "Investigation Report",
         createdAt: now(),
-        createdBy: item.sessionId,
+        createdBy: user.id,
         approver: user.id,
         discrepancy: reason,
         barcodes: [...item.missing, ...item.extra],
@@ -1263,6 +1084,34 @@ export default function Home() {
     });
   }
 
+  if (backendStatus === "loading") {
+    return (
+      <main className="grid min-h-screen place-items-center bg-slate-100 px-4 text-slate-950">
+        <section className="w-full max-w-md rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <div className="inline-flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
+            <ShieldCheck size={18} /> Mr Makhana WMS
+          </div>
+          <h1 className="mt-6 text-2xl font-bold">Loading Supabase data</h1>
+          <p className="mt-2 text-sm text-slate-600">{backendMessage}</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (backendStatus === "error" && !state.users.length) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-slate-100 px-4 text-slate-950">
+        <section className="w-full max-w-md rounded-xl bg-white p-6 shadow-sm ring-1 ring-rose-200">
+          <div className="inline-flex items-center gap-2 rounded-lg bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">
+            <AlertTriangle size={18} /> Supabase unavailable
+          </div>
+          <h1 className="mt-6 text-2xl font-bold">Database load failed</h1>
+          <p className="mt-2 text-sm text-slate-600">{backendMessage}</p>
+        </section>
+      </main>
+    );
+  }
+
   if (!user) {
     return (
       <main className="min-h-screen bg-slate-100 px-4 py-8 text-slate-950">
@@ -1355,6 +1204,9 @@ export default function Home() {
             </div>
             <div className={`mt-1 inline-flex rounded-md px-2 py-1 text-xs font-bold ${state.settings.mode === "development" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
               {state.settings.mode === "development" ? "Development Mode" : "Production Mode"}
+            </div>
+            <div className={`mt-1 inline-flex rounded-md px-2 py-1 text-xs font-bold ${backendStatus === "error" ? "bg-rose-100 text-rose-800" : backendStatus === "saving" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>
+              {backendMessage}
             </div>
           </div>
           <div className="hidden flex-1 items-center justify-end gap-2 md:flex">
@@ -1627,6 +1479,7 @@ export default function Home() {
             hasReports={operationalDocuments.some((item) => item.type.includes("Report"))}
             hasPdfDocuments={operationalDocuments.length > 0}
             hasBarcodeData={operationalCartons.length > 0}
+            hasAuditLogs={state.audit.length > 0}
           />
         ) : null}
       </div>
@@ -1743,6 +1596,7 @@ function PreLaunchChecklist({
   hasReports,
   hasPdfDocuments,
   hasBarcodeData,
+  hasAuditLogs,
 }: {
   supabaseStatus: "checking" | "connected" | "missing" | "error";
   mode: AppMode;
@@ -1754,14 +1608,17 @@ function PreLaunchChecklist({
   hasReports: boolean;
   hasPdfDocuments: boolean;
   hasBarcodeData: boolean;
+  hasAuditLogs: boolean;
 }) {
   const checks = [
     { label: "Supabase connected", ok: supabaseStatus === "connected", detail: supabaseStatus },
-    { label: "Inventory working", ok: hasRealCartons || hasBarcodeData, detail: hasRealCartons ? "Real inventory present" : "Demo/UAT inventory present" },
-    { label: "Dispatch working", ok: hasDispatch, detail: "Dispatch slip/session exists" },
-    { label: "Receiving working", ok: hasReceiving, detail: hasReceiving ? "Receiving document exists" : "Run a receiving UAT flow" },
-    { label: "Transfers working", ok: hasTransfer, detail: hasTransfer ? "Transfer document exists" : "Run a transfer UAT flow" },
-    { label: "Reports working", ok: hasReports, detail: "Report documents available" },
+    { label: "Products persisted in Supabase", ok: hasRealProducts, detail: hasRealProducts ? "Real products saved" : "Create a real product" },
+    { label: "Inventory persisted in Supabase", ok: hasRealCartons || hasBarcodeData, detail: hasRealCartons ? "Real cartons saved" : "Demo/UAT cartons loaded from Supabase" },
+    { label: "Dispatches persisted in Supabase", ok: hasDispatch, detail: "Dispatch session and slip loaded from Supabase" },
+    { label: "Receiving persisted in Supabase", ok: hasReceiving, detail: hasReceiving ? "Receiving document loaded from Supabase" : "Run a receiving UAT flow" },
+    { label: "Transfers persisted in Supabase", ok: hasTransfer, detail: hasTransfer ? "Transfer document loaded from Supabase" : "Run a transfer UAT flow" },
+    { label: "Reports generated from Supabase", ok: hasReports, detail: "Report documents loaded from Supabase" },
+    { label: "Audit logs generated from Supabase", ok: hasAuditLogs, detail: hasAuditLogs ? "Audit logs loaded from Supabase" : "Create an audited action" },
     { label: "PDF generation working", ok: hasPdfDocuments, detail: "Document records can generate PDFs" },
     { label: "Barcode scanning working", ok: hasBarcodeData, detail: "Barcode registry/cartons available" },
     { label: "Production mode ready", ok: mode === "production" && hasRealProducts, detail: mode === "production" ? "Production Mode active" : "Still in Development Mode" },
@@ -1908,7 +1765,7 @@ function ProductsPanel({ products, onAddProduct, onGenerateBatch }: { products: 
           <SelectField name="status" label="Status"><option value="Active">Active</option><option value="Blocked">Blocked</option></SelectField>
         </div>
         <TextField name="template" label="Barcode template" required defaultValue={barcodeTemplate} className="mt-4 font-mono text-xs" />
-        <Button className="mt-4"><Archive size={18} /> Create product</Button>
+        <Button type="submit" className="mt-4"><Archive size={18} /> Create product</Button>
       </form>
       <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
         <h2 className="text-lg font-bold">Batch / carton generation</h2>

@@ -78,6 +78,8 @@ Completed:
 - Verified public tables and RLS policies
 - Created test Auth users and matching `public.profiles`
 - Seeded warehouses, products, cartons, a factory dispatch, documents, mismatch case, and audit records
+- Added `/api/wms` as the operational data layer for products, inventory, barcode registry, batches, cartons, dispatch/receiving/transfer/customer dispatch sessions, shortage cases, approvals, reports, system settings, and audit logs
+- Removed browser/localStorage operational state; page refresh, logout, and login reload operational data from Supabase
 - Added production Vercel env vars:
 
 ```bash
@@ -86,7 +88,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY
 ```
 
-The current frontend still uses the audited browser demo store. Supabase is ready for replacing the local reducer with Supabase queries/server actions.
+The frontend now loads operational state from Supabase through `/api/wms` and persists operational mutations back to Supabase. Browser storage is used only for the current local UAT login session, not for WMS operational data.
 
 ## Release Checks
 

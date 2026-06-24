@@ -92,6 +92,7 @@ create table public.scan_sessions (
   session_type text not null,
   source_warehouse_id uuid references public.warehouses(id),
   destination_warehouse_id uuid references public.warehouses(id),
+  source_session_id uuid references public.scan_sessions(id),
   customer text,
   vehicle_number text,
   driver_name text,
