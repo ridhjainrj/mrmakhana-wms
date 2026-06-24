@@ -41,3 +41,7 @@ yarn-error.log*
 next-env.d.ts
 
 .vercel
+
+# supabase local state
+.supabase-db-password.local
+supabase/.temp/

@@ -4,11 +4,12 @@ Mobile-first carton-level warehouse management for Mr Makhana inventory, barcode
 
 ## Current Build
 
-The app is deployed on Vercel and runs as a full audited demo WMS in browser storage until live Supabase credentials are connected. The production database contract and RLS policies are in `supabase/schema.sql`.
+The app is deployed on Vercel and runs as a full audited demo WMS in browser storage. Supabase is provisioned, seeded, and configured in Vercel for the next backend wiring pass. The production database contract and RLS policies are in `supabase/schema.sql`.
 
 - Live app: https://mrmakhana-wms.vercel.app/
 - GitHub repo: https://github.com/ridhjainrj/mrmakhana-wms
 - Vercel project: `ridh-s-projects/mrmakhana-wms`
+- Supabase project: `yagdnrnfqbqcqgcbejuc` (`mrmakhana-wms`, `ap-south-1`)
 
 Implemented:
 
@@ -49,30 +50,25 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Production Supabase Setup
+## Production Supabase Status
 
-The Supabase CLI is installed, but this non-TTY shell needs an access token:
+Completed:
 
-```bash
-$env:SUPABASE_ACCESS_TOKEN="sbp_..."
-supabase projects list
-```
-
-After the token is available:
-
-1. Create/link the Supabase project.
-2. Run `supabase/schema.sql` in the Supabase SQL editor or via `supabase db push`.
-3. Create Auth users for the test roles.
-4. Insert matching rows in `public.profiles` with each Auth user id and the correct role.
-5. Add these environment variables to Vercel:
+- Created Supabase organization `Mr Makhana`
+- Created project `mrmakhana-wms` in `ap-south-1`
+- Applied `supabase/schema.sql`
+- Verified public tables and RLS policies
+- Created test Auth users and matching `public.profiles`
+- Seeded warehouses, products, cartons, a factory dispatch, documents, mismatch case, and audit records
+- Added production Vercel env vars:
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY
+SUPABASE_SERVICE_ROLE_KEY
 ```
 
-The current app is demo-storage backed. The schema is ready for replacing the local reducer with Supabase queries/server actions once project keys are available.
+The current frontend still uses the audited browser demo store. Supabase is ready for replacing the local reducer with Supabase queries/server actions.
 
 ## Release Checks
 
