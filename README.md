@@ -4,7 +4,11 @@ Mobile-first carton-level warehouse management for Mr Makhana inventory, barcode
 
 ## Current Build
 
-The app runs as a full demo WMS in browser storage so it can be tested without live Supabase credentials. The production database contract and RLS policies are in `supabase/schema.sql`.
+The app is deployed on Vercel and runs as a full audited demo WMS in browser storage until live Supabase credentials are connected. The production database contract and RLS policies are in `supabase/schema.sql`.
+
+- Live app: https://mrmakhana-wms.vercel.app/
+- GitHub repo: https://github.com/ridhjainrj/mrmakhana-wms
+- Vercel project: `ridh-s-projects/mrmakhana-wms`
 
 Implemented:
 
@@ -24,6 +28,7 @@ Implemented:
 - Low stock, near-expiry, pending receipt, duplicate barcode, missing carton dashboards
 - Mandatory reasons for reversal and shortage/write-off approvals
 - Audit logs for important inventory actions
+- Automated release tests for role rules, barcode formats, scan blocking, receiving source enforcement, finalization requirements, and customer dispatch checks
 
 ## Test Credentials
 
@@ -46,8 +51,17 @@ Open `http://localhost:3000`.
 
 ## Production Supabase Setup
 
-1. Create a Supabase project.
-2. Run `supabase/schema.sql` in the Supabase SQL editor.
+The Supabase CLI is installed, but this non-TTY shell needs an access token:
+
+```bash
+$env:SUPABASE_ACCESS_TOKEN="sbp_..."
+supabase projects list
+```
+
+After the token is available:
+
+1. Create/link the Supabase project.
+2. Run `supabase/schema.sql` in the Supabase SQL editor or via `supabase db push`.
 3. Create Auth users for the test roles.
 4. Insert matching rows in `public.profiles` with each Auth user id and the correct role.
 5. Add these environment variables to Vercel:
@@ -60,19 +74,15 @@ SUPABASE_SERVICE_ROLE_KEY=
 
 The current app is demo-storage backed. The schema is ready for replacing the local reducer with Supabase queries/server actions once project keys are available.
 
-## GitHub and Vercel Deploy
+## Release Checks
 
-This machine does not currently have authenticated `gh` or `vercel` CLIs available. After installing/logging in:
+Run these before every deployment:
 
 ```bash
-git add .
-git commit -m "Build Mr Makhana WMS"
-gh repo create mrmakhana-wms --private --source . --push
-vercel link
-vercel env add NEXT_PUBLIC_SUPABASE_URL production
-vercel env add NEXT_PUBLIC_SUPABASE_ANON_KEY production
-vercel env add SUPABASE_SERVICE_ROLE_KEY production
-vercel deploy --prod
+npm run lint
+npm test
+npm run build
+npm audit --omit=dev
 ```
 
-Return the Vercel production URL and GitHub repo URL after those credential-dependent steps complete.
+Latest audited release passed all four checks and was deployed with `vercel --prod`.
