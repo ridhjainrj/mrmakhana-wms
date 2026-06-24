@@ -13,6 +13,11 @@ The app is deployed on Vercel and runs as a full audited demo WMS in browser sto
 
 Implemented:
 
+- UAT system mode switch for Development Mode and Production Mode
+- Demo data separation with `demo`, `real`, and `system` origin flags
+- Admin Demo Data Manager with view, archive, restore, and permanent delete actions
+- Production Cutover Tool with a single Go Live action that archives demo operational data
+- Pre-launch checklist for Supabase, inventory, dispatch, receiving, transfers, reports, PDFs, barcode scanning, and production readiness
 - Role-based login and menus for Admin, Accountant, Warehouse Manager, Operator, Viewer
 - Carton-level inventory with unique barcode assets and lifecycle timeline through audit records
 - USB/Bluetooth scanner input with auto-focus and Enter processing
@@ -40,6 +45,19 @@ Implemented:
 | Warehouse Manager | `manager@mrmakhana.test` | `Manager@123` |
 | Operator | `operator@mrmakhana.test` | `Operator@123` |
 | Viewer | `viewer@mrmakhana.test` | `Viewer@123` |
+
+## UAT Mode And Cutover
+
+The application is currently in UAT. Demo, seed, and test data are intentionally retained for workflow testing, barcode testing, dispatch testing, receiving testing, transfer testing, approval testing, document generation testing, and role testing.
+
+Admin users can open **Demo Data** to switch between:
+
+- **Development Mode**: demo products, seeded inventory, sample workflows, and test users stay visible for UAT.
+- **Production Mode**: demo products, sample inventory, sample dispatches, sample reports, and archived demo records are hidden from operational screens so only real business data is shown.
+
+The **Go Live** action archives demo inventory, demo products, demo dispatches, demo reports, scan sessions, and mismatch cases while preserving system settings, users, warehouses, barcode templates, audit logs, and configuration. Real Excel imports and real generated batches are tagged as real data and remain visible after cutover.
+
+Do not permanently delete demo data until Supabase wiring, Excel import, barcode workflows, reports, PDF slips, and all warehouse flows have passed UAT.
 
 ## Local Development
 

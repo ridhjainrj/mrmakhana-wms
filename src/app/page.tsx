@@ -8,6 +8,7 @@ import {
   BarChart3,
   Camera,
   CheckCircle2,
+  ClipboardCheck,
   Download,
   FileText,
   History,
@@ -17,6 +18,7 @@ import {
   Printer,
   QrCode,
   Search,
+  Settings,
   ShieldCheck,
   Truck,
   Upload,
@@ -38,6 +40,8 @@ import {
 } from "@/lib/wms-core";
 
 type Role = "Admin" | "Accountant" | "Warehouse Manager" | "Operator" | "Viewer";
+type AppMode = "development" | "production";
+type DataOrigin = "demo" | "real" | "system";
 type Status =
   | "IN_FACTORY"
   | "DISPATCH_PENDING"
@@ -82,6 +86,8 @@ type Product = {
   hsn?: string;
   status: "Active" | "Blocked";
   template: string;
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
 };
 
 type WarehouseRecord = {
@@ -109,6 +115,8 @@ type Carton = {
   status: Status;
   customer?: string;
   blockedReason?: string;
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
 };
 
 type AuditLog = {
@@ -139,6 +147,8 @@ type DocumentRecord = {
   notes?: string;
   discrepancy?: string;
   barcodes: string[];
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
 };
 
 type ScanSession = {
@@ -160,6 +170,8 @@ type ScanSession = {
   expected?: string[];
   finalized: boolean;
   mismatch?: string;
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
 };
 
 type MismatchCase = {
@@ -172,9 +184,16 @@ type MismatchCase = {
   duplicates: string[];
   approvedBy?: string;
   reason?: string;
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
 };
 
 type AppState = {
+  settings: {
+    mode: AppMode;
+    goLiveAt?: string;
+    supabaseProjectRef?: string;
+  };
   users: User[];
   products: Product[];
   warehouses: WarehouseRecord[];
@@ -234,6 +253,7 @@ function seedState(): AppState {
       hsn: "190410",
       status: "Active",
       template: "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}",
+      dataOrigin: "demo",
     },
     {
       id: "p-cheese",
@@ -252,6 +272,7 @@ function seedState(): AppState {
       hsn: "190410",
       status: "Active",
       template: "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}",
+      dataOrigin: "demo",
     },
   ];
 
@@ -278,6 +299,7 @@ function seedState(): AppState {
         cartonNo,
         warehouseId: i <= 7 ? "factory" : "delhi",
         status: i <= 7 ? "IN_FACTORY" : "RECEIVED_AT_WAREHOUSE",
+        dataOrigin: "demo",
       });
     }
   });
@@ -306,6 +328,7 @@ function seedState(): AppState {
       updatedAt: now(),
       scanned: sampleDispatch,
       finalized: true,
+      dataOrigin: "demo",
     },
   ];
 
@@ -322,6 +345,7 @@ function seedState(): AppState {
       lr: "LR-1024",
       transporter: "North Line Logistics",
       barcodes: sampleDispatch,
+      dataOrigin: "demo",
     },
     {
       id: "VLS-260624-001",
@@ -335,6 +359,7 @@ function seedState(): AppState {
       lr: "LR-1024",
       transporter: "North Line Logistics",
       barcodes: sampleDispatch,
+      dataOrigin: "demo",
     },
     {
       id: "DMG-260624-001",
@@ -344,6 +369,7 @@ function seedState(): AppState {
       source: "Factory",
       discrepancy: "Corner crushed during pallet movement",
       barcodes: [cartons[4].barcode],
+      dataOrigin: "demo",
     },
     {
       id: "CYC-260624-001",
@@ -353,6 +379,7 @@ function seedState(): AppState {
       source: "Delhi Warehouse",
       notes: "Seed cycle count matched physical stock.",
       barcodes: cartons.filter((carton) => carton.warehouseId === "delhi").map((carton) => carton.barcode),
+      dataOrigin: "demo",
     },
     {
       id: "INV-260624-001",
@@ -361,6 +388,7 @@ function seedState(): AppState {
       createdBy: "u-admin",
       source: "All Warehouses",
       barcodes: cartons.map((carton) => carton.barcode),
+      dataOrigin: "demo",
     },
     {
       id: "TRACE-260624-001",
@@ -370,6 +398,7 @@ function seedState(): AppState {
       source: "Factory",
       destination: "In Transit",
       barcodes: [sampleDispatch[0]],
+      dataOrigin: "demo",
     },
   ];
 
@@ -383,6 +412,7 @@ function seedState(): AppState {
       extra: ["MMUNKNOWNB2606A70G72pcs99PP99999"],
       duplicates: [],
       reason: "Seed mismatch case for receiving investigation workflow.",
+      dataOrigin: "demo",
     },
   ];
 
@@ -398,7 +428,7 @@ function seedState(): AppState {
     newValue: "IN_TRANSIT",
   }));
 
-  return { users, products, warehouses, cartons, sessions, documents, mismatches, audit, registry: cartons };
+  return { settings: { mode: "development", supabaseProjectRef: "yagdnrnfqbqcqgcbejuc" }, users, products, warehouses, cartons, sessions, documents, mismatches, audit, registry: cartons };
 }
 
 function loadState(): AppState {
@@ -406,14 +436,43 @@ function loadState(): AppState {
   const saved = window.localStorage.getItem(storageKey);
   if (!saved) return seedState();
   try {
-    return JSON.parse(saved) as AppState;
+    return normalizeState(JSON.parse(saved) as AppState);
   } catch {
     return seedState();
   }
 }
 
+function normalizeState(state: AppState): AppState {
+  const seeded = seedState();
+  return {
+    ...seeded,
+    ...state,
+    settings: {
+      mode: state.settings?.mode ?? "development",
+      supabaseProjectRef: state.settings?.supabaseProjectRef ?? "yagdnrnfqbqcqgcbejuc",
+      goLiveAt: state.settings?.goLiveAt,
+    },
+    products: (state.products ?? seeded.products).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    cartons: (state.cartons ?? seeded.cartons).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    sessions: (state.sessions ?? seeded.sessions).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    documents: (state.documents ?? seeded.documents).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    mismatches: (state.mismatches ?? seeded.mismatches).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+    registry: (state.registry ?? state.cartons ?? seeded.registry).map((item) => ({ dataOrigin: "demo" as DataOrigin, ...item })),
+  };
+}
+
 function can(user: User, action: "manage" | "sensitive" | "scan" | "view") {
   return canRole(user.role, action);
+}
+
+function isOperationalRecord(record: { dataOrigin?: DataOrigin; archived?: boolean }, mode: AppMode) {
+  if (record.archived) return false;
+  if (mode === "production" && record.dataOrigin === "demo") return false;
+  return true;
+}
+
+function isDemoRecord(record: { dataOrigin?: DataOrigin }) {
+  return record.dataOrigin === "demo";
 }
 
 function Button({
@@ -493,8 +552,9 @@ function SelectField(props: React.SelectHTMLAttributes<HTMLSelectElement> & { la
 }
 
 export default function Home() {
-  const [state, setState] = useState<AppState>(() => loadState());
-  const [activeUserId, setActiveUserId] = useState<string>(() => (typeof window === "undefined" ? "" : window.localStorage.getItem(sessionUserKey) ?? ""));
+  const [state, setState] = useState<AppState>(() => seedState());
+  const [activeUserId, setActiveUserId] = useState("");
+  const [hydrated, setHydrated] = useState(false);
   const [email, setEmail] = useState("admin@mrmakhana.test");
   const [password, setPassword] = useState("Admin@123");
   const [loginError, setLoginError] = useState("");
@@ -505,17 +565,35 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [cameraOn, setCameraOn] = useState(false);
+  const [supabaseStatus, setSupabaseStatus] = useState<"checking" | "connected" | "missing" | "error">(() =>
+    process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? "checking" : "missing",
+  );
   const scanRef = useRef<HTMLInputElement>(null);
 
   const user = state.users.find((item) => item.id === activeUserId) ?? null;
 
   useEffect(() => {
-    window.localStorage.setItem(storageKey, JSON.stringify(state));
-  }, [state]);
+    const timer = window.setTimeout(() => {
+      setState(loadState());
+      setActiveUserId(window.localStorage.getItem(sessionUserKey) ?? "");
+      setHydrated(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
-    if (activeUserId) window.localStorage.setItem(sessionUserKey, activeUserId);
-  }, [activeUserId]);
+    if (!hydrated) return;
+    window.localStorage.setItem(storageKey, JSON.stringify(state));
+  }, [hydrated, state]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (activeUserId) {
+      window.localStorage.setItem(sessionUserKey, activeUserId);
+      return;
+    }
+    window.localStorage.removeItem(sessionUserKey);
+  }, [activeUserId, hydrated]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -532,29 +610,60 @@ export default function Home() {
     scanRef.current?.focus();
   }, [view, session]);
 
+  useEffect(() => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !anonKey) return;
+    fetch(`${url}/auth/v1/settings`, { headers: { apikey: anonKey } })
+      .then((response) => setSupabaseStatus(response.ok ? "connected" : "error"))
+      .catch(() => setSupabaseStatus("error"));
+  }, []);
+
   const warehouseById = useMemo(() => Object.fromEntries(state.warehouses.map((item) => [item.id, item.name])), [state.warehouses]);
   const productById = useMemo(() => Object.fromEntries(state.products.map((item) => [item.id, item])), [state.products]);
+  const operationalProducts = useMemo(() => state.products.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.products, state.settings.mode]);
+  const operationalCartons = useMemo(() => state.cartons.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.cartons, state.settings.mode]);
+  const operationalSessions = useMemo(() => state.sessions.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.sessions, state.settings.mode]);
+  const operationalDocuments = useMemo(() => state.documents.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.documents, state.settings.mode]);
+  const operationalMismatches = useMemo(() => state.mismatches.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.mismatches, state.settings.mode]);
+  const demoCounts = useMemo(
+    () => ({
+      products: state.products.filter(isDemoRecord).length,
+      cartons: state.cartons.filter(isDemoRecord).length,
+      sessions: state.sessions.filter(isDemoRecord).length,
+      documents: state.documents.filter(isDemoRecord).length,
+      mismatches: state.mismatches.filter(isDemoRecord).length,
+      archived: [
+        ...state.products,
+        ...state.cartons,
+        ...state.sessions,
+        ...state.documents,
+        ...state.mismatches,
+      ].filter((item) => isDemoRecord(item) && item.archived).length,
+    }),
+    [state],
+  );
 
   const metrics = useMemo(() => {
-    const active = state.cartons.filter((carton) => !["VOIDED", "REVERSED"].includes(carton.status));
+    const active = operationalCartons.filter((carton) => !["VOIDED", "REVERSED"].includes(carton.status));
     return {
       cartons: active.length,
       units: active.reduce((sum, carton) => sum + carton.qty, 0),
       inTransit: active.filter((carton) => carton.status.includes("IN_TRANSIT")).length,
       blocked: active.filter((carton) => lockedStatuses.includes(carton.status)).length,
       nearExpiry: active.filter((carton) => daysFrom(carton.expiry) <= 45 && daysFrom(carton.expiry) >= 0).length,
-      missing: state.mismatches.filter((item) => item.status !== "Closed").reduce((sum, item) => sum + item.missing.length, 0),
+      missing: operationalMismatches.filter((item) => item.status !== "Closed").reduce((sum, item) => sum + item.missing.length, 0),
     };
-  }, [state]);
+  }, [operationalCartons, operationalMismatches]);
 
   const sourceSessions = useMemo(() => {
     const hasMovableExpected = (item: ScanSession, status: Status) =>
-      item.scanned.some((barcode) => state.cartons.find((carton) => carton.barcode === barcode)?.status === status);
+      item.scanned.some((barcode) => operationalCartons.find((carton) => carton.barcode === barcode)?.status === status);
     return {
-      receiving: state.sessions.filter((item) => item.finalized && item.type === "Factory Dispatch" && hasMovableExpected(item, "IN_TRANSIT")),
-      transferIn: state.sessions.filter((item) => item.finalized && item.type === "Transfer Out" && hasMovableExpected(item, "IN_TRANSIT_TRANSFER")),
+      receiving: operationalSessions.filter((item) => item.finalized && item.type === "Factory Dispatch" && hasMovableExpected(item, "IN_TRANSIT")),
+      transferIn: operationalSessions.filter((item) => item.finalized && item.type === "Transfer Out" && hasMovableExpected(item, "IN_TRANSIT_TRANSFER")),
     };
-  }, [state.cartons, state.sessions]);
+  }, [operationalCartons, operationalSessions]);
 
   function mutate(updater: (draft: AppState) => void) {
     setState((current) => {
@@ -612,15 +721,16 @@ export default function Home() {
       updatedAt: now(),
       scanned: [],
       finalized: false,
+      dataOrigin: source?.dataOrigin ?? (state.settings.mode === "production" ? "real" : "demo"),
     });
     setScanMessage(null);
     setView("Scanning");
   }
 
   function validateScan(barcode: string, activeSession: ScanSession) {
-    const duplicateDraft = state.sessions.find((item) => !item.finalized && item.id !== activeSession.id && item.scanned.includes(barcode));
+    const duplicateDraft = operationalSessions.find((item) => !item.finalized && item.id !== activeSession.id && item.scanned.includes(barcode));
     if (duplicateDraft) return { ok: false, message: `Duplicate scan blocked: carton is already in draft ${duplicateDraft.type}.` };
-    return validateScanRule(barcode, activeSession, state.cartons, state.products);
+    return validateScanRule(barcode, activeSession, operationalCartons, operationalProducts);
   }
 
   function handleScan(raw: string) {
@@ -741,6 +851,7 @@ export default function Home() {
         notes: session.notes,
         discrepancy: missing.length || extra.length ? `Missing: ${missing.length}, Extra: ${extra.length}` : undefined,
         barcodes: session.scanned,
+        dataOrigin: session.dataOrigin,
       });
       if (session.type === "Factory Dispatch") {
         draft.documents.unshift({
@@ -756,6 +867,7 @@ export default function Home() {
           transporter: session.transporter,
           notes: session.notes,
           barcodes: session.scanned,
+          dataOrigin: session.dataOrigin,
         });
       }
       if (session.type === "Customer Dispatch") {
@@ -772,6 +884,7 @@ export default function Home() {
           transporter: session.transporter,
           notes: session.notes,
           barcodes: session.scanned,
+          dataOrigin: session.dataOrigin,
         });
       }
       if (missing.length || extra.length) {
@@ -784,6 +897,7 @@ export default function Home() {
           extra,
           duplicates: [],
           reason: "Auto-created from receiving/transfer mismatch.",
+          dataOrigin: session.dataOrigin,
         });
       }
     });
@@ -883,6 +997,7 @@ export default function Home() {
           cartonNo: String(row.carton_number ?? parsed.cartonNo),
           warehouseId: String(row.current_warehouse ?? "factory"),
           status: "IN_FACTORY",
+          dataOrigin: "real",
         });
       }
     });
@@ -915,6 +1030,7 @@ export default function Home() {
       hsn: String(form.get("hsn")),
       status: String(form.get("status")) as Product["status"],
       template: String(form.get("template") || barcodeTemplate),
+      dataOrigin: "real",
     };
     mutate((draft) => draft.products.unshift(product));
     audit("Product created", { newValue: product.sku });
@@ -949,6 +1065,7 @@ export default function Home() {
         cartonNo,
         warehouseId: "factory",
         status: "IN_FACTORY" as Status,
+        dataOrigin: "real" as DataOrigin,
       };
     });
     mutate((draft) => {
@@ -962,6 +1079,7 @@ export default function Home() {
         source: "Factory",
         destination: "Factory",
         barcodes: created.map((carton) => carton.barcode),
+        dataOrigin: "real",
       });
       draft.documents.unshift({
         id: `BLS-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 2).padStart(3, "0")}`,
@@ -971,6 +1089,7 @@ export default function Home() {
         source: "Factory",
         destination: "Factory",
         barcodes: created.map((carton) => carton.barcode),
+        dataOrigin: "real",
       });
     });
     audit("Production batch generated", { newValue: `${batch}: ${count} cartons`, reason: "Auto-generated padded carton numbers." });
@@ -999,6 +1118,7 @@ export default function Home() {
         approver: user.id,
         discrepancy: reason,
         barcodes: [...item.missing, ...item.extra],
+        dataOrigin: item.dataOrigin,
       });
       draft.documents.unshift({
         id: `IR-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 1).padStart(3, "0")}`,
@@ -1008,6 +1128,7 @@ export default function Home() {
         approver: user.id,
         discrepancy: reason,
         barcodes: [...item.missing, ...item.extra],
+        dataOrigin: item.dataOrigin,
       });
     });
     audit("Shortage approved", { documentRef: id, reason });
@@ -1031,8 +1152,114 @@ export default function Home() {
         source: warehouseById[carton.warehouseId],
         discrepancy: reason,
         barcodes: [barcode],
+        dataOrigin: carton.dataOrigin,
       });
       draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Carton reversed", barcode, documentRef, oldValue, newValue: "REVERSED", reason });
+    });
+  }
+
+  function setSystemMode(mode: AppMode) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      draft.settings.mode = mode;
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: `System mode changed to ${mode === "development" ? "Development" : "Production"}`,
+        oldValue: state.settings.mode,
+        newValue: mode,
+        reason: "Admin system setting update",
+      });
+    });
+  }
+
+  function setDemoArchived(archived: boolean, reason: string) {
+    if (!user || user.role !== "Admin" || !reason.trim()) return;
+    mutate((draft) => {
+      draft.products.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.cartons.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.sessions.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.documents.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.mismatches.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.registry.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = archived;
+      });
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: archived ? "Demo data archived" : "Demo data restored",
+        reason,
+      });
+    });
+  }
+
+  function deleteDemoDataPermanently(reason: string) {
+    if (!user || user.role !== "Admin" || !reason.trim()) return;
+    mutate((draft) => {
+      draft.products = draft.products.filter((item) => !isDemoRecord(item));
+      draft.cartons = draft.cartons.filter((item) => !isDemoRecord(item));
+      draft.sessions = draft.sessions.filter((item) => !isDemoRecord(item));
+      draft.documents = draft.documents.filter((item) => !isDemoRecord(item));
+      draft.mismatches = draft.mismatches.filter((item) => !isDemoRecord(item));
+      draft.registry = draft.registry.filter((item) => !isDemoRecord(item));
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: "Demo data permanently deleted",
+        reason,
+      });
+    });
+  }
+
+  function goLive(reason: string) {
+    if (!user || user.role !== "Admin" || !reason.trim()) return;
+    mutate((draft) => {
+      draft.settings.mode = "production";
+      draft.settings.goLiveAt = now();
+      draft.products.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.cartons.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.sessions.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.documents.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.mismatches.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.registry.forEach((item) => {
+        if (isDemoRecord(item)) item.archived = true;
+      });
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: "Go Live completed",
+        oldValue: "development",
+        newValue: "production",
+        reason,
+      });
     });
   }
 
@@ -1047,7 +1274,7 @@ export default function Home() {
               </div>
               <h1 className="mt-8 max-w-xl text-4xl font-bold leading-tight text-slate-950">Carton-level warehouse control for scanning, dispatch, receiving, transfer, and audit.</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600">
-                Demo mode is seeded with role-based users, warehouses, cartons, dispatches, mismatch cases, reports, and document slips. Production Supabase credentials can replace local demo storage.
+                Development Mode is seeded with role-based users, warehouses, cartons, dispatches, mismatch cases, reports, and document slips. Production Mode hides demo operational data for cutover.
               </p>
             </div>
             <div className="grid gap-3 sm:grid-cols-3">
@@ -1064,7 +1291,7 @@ export default function Home() {
             }}
           >
             <h2 className="text-2xl font-bold">Sign in</h2>
-            <p className="mt-2 text-sm text-slate-600">Use one of the seeded internal test accounts.</p>
+            <p className="mt-2 text-sm text-slate-600">{state.settings.mode === "development" ? "Use one of the seeded internal test accounts." : "Production Mode is active. Test account shortcuts are hidden."}</p>
             <div className="mt-6 grid gap-4">
               <TextField label="Email" value={email} onChange={(event) => setEmail(event.target.value)} />
               <TextField label="Password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
@@ -1073,7 +1300,7 @@ export default function Home() {
                 <Lock size={18} /> Sign in
               </Button>
             </div>
-            <div className="mt-6 space-y-2 text-xs text-slate-600">
+            {state.settings.mode === "development" ? <div className="mt-6 space-y-2 text-xs text-slate-600">
               {state.users.map((item) => (
                 <button
                   type="button"
@@ -1088,7 +1315,7 @@ export default function Home() {
                   <span>{item.email}</span>
                 </button>
               ))}
-            </div>
+            </div> : null}
           </form>
         </section>
       </main>
@@ -1103,14 +1330,16 @@ export default function Home() {
     ["Documents", FileText, can(user, "view")],
     ["Reports", Warehouse, can(user, "view")],
     ["Audit", History, user.role !== "Operator"],
+    ["Demo Data", Settings, user.role === "Admin"],
+    ["Checklist", ClipboardCheck, user.role === "Admin"],
   ] as const;
 
-  const visibleCartons = state.cartons.filter((carton) => {
+  const visibleCartons = operationalCartons.filter((carton) => {
     if (user.role === "Admin" || user.role === "Accountant") return true;
     return carton.warehouseId === user.warehouseId || carton.status.includes("IN_TRANSIT");
   });
   const searchMatches = search.trim()
-    ? state.cartons.filter((carton) => carton.barcode.toLowerCase().includes(search.toLowerCase()) || carton.sku.toLowerCase().includes(search.toLowerCase()) || carton.batch.toLowerCase().includes(search.toLowerCase()))
+    ? operationalCartons.filter((carton) => carton.barcode.toLowerCase().includes(search.toLowerCase()) || carton.sku.toLowerCase().includes(search.toLowerCase()) || carton.batch.toLowerCase().includes(search.toLowerCase()))
     : [];
 
   return (
@@ -1123,6 +1352,9 @@ export default function Home() {
             </div>
             <div className="truncate text-xs font-semibold text-slate-500">
               {user.name} / {user.role} / {warehouseById[user.warehouseId]}
+            </div>
+            <div className={`mt-1 inline-flex rounded-md px-2 py-1 text-xs font-bold ${state.settings.mode === "development" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+              {state.settings.mode === "development" ? "Development Mode" : "Production Mode"}
             </div>
           </div>
           <div className="hidden flex-1 items-center justify-end gap-2 md:flex">
@@ -1183,10 +1415,10 @@ export default function Home() {
                   </Button>
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2">
-                  <AlertPanel title="Low stock alerts" items={state.products.map((product) => `${product.sku}: ${visibleCartons.filter((carton) => carton.productId === product.id && !lockedStatuses.includes(carton.status)).length} cartons`)} />
+                  <AlertPanel title="Low stock alerts" items={operationalProducts.map((product) => `${product.sku}: ${visibleCartons.filter((carton) => carton.productId === product.id && !lockedStatuses.includes(carton.status)).length} cartons`)} />
                   <AlertPanel title="Near-expiry alerts" items={visibleCartons.filter((carton) => daysFrom(carton.expiry) <= 45).slice(0, 6).map((carton) => `${carton.sku} ${carton.cartonNo}: ${daysFrom(carton.expiry)} days`)} />
-                  <AlertPanel title="Pending receipt reminders" items={state.sessions.filter((item) => item.type === "Factory Dispatch" && item.finalized).slice(0, 4).map((item) => `${item.id}: ${item.scanned.length} cartons dispatched`)} />
-                  <AlertPanel title="Duplicate barcode dashboard" items={findDuplicates(state.cartons.map((carton) => carton.barcode)).map((barcode) => barcode)} />
+                  <AlertPanel title="Pending receipt reminders" items={operationalSessions.filter((item) => item.type === "Factory Dispatch" && item.finalized).slice(0, 4).map((item) => `${item.id}: ${item.scanned.length} cartons dispatched`)} />
+                  <AlertPanel title="Duplicate barcode dashboard" items={findDuplicates(operationalCartons.map((carton) => carton.barcode)).map((barcode) => barcode)} />
                 </div>
               </section>
               <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
@@ -1219,7 +1451,7 @@ export default function Home() {
               <div className="mt-5">
                 <h3 className="text-sm font-bold uppercase text-slate-500">Saved drafts</h3>
                 <div className="mt-2 space-y-2">
-                  {state.sessions.filter((item) => !item.finalized).length ? state.sessions.filter((item) => !item.finalized).map((item) => (
+                  {operationalSessions.filter((item) => !item.finalized).length ? operationalSessions.filter((item) => !item.finalized).map((item) => (
                     <button key={item.id} onClick={() => resumeDraft(item.id)} className="w-full rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50">
                       <div className="font-bold">{item.type}</div>
                       <div className="text-xs text-slate-500">{item.scanned.length} scans / {new Date(item.updatedAt).toLocaleString()}</div>
@@ -1286,7 +1518,7 @@ export default function Home() {
                   {cameraOn ? <CameraScanner onScan={handleScan} /> : null}
                   <div className="mt-5 max-h-[360px] space-y-2 overflow-auto">
                     {session.scanned.map((barcode) => {
-                      const carton = state.cartons.find((item) => item.barcode === barcode);
+                      const carton = operationalCartons.find((item) => item.barcode === barcode);
                       return carton ? <CartonRow key={barcode} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} /> : null;
                     })}
                   </div>
@@ -1299,7 +1531,7 @@ export default function Home() {
         ) : null}
 
         {view === "Products" ? (
-          <ProductsPanel products={state.products} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
+          <ProductsPanel products={operationalProducts} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
         ) : null}
 
         {view === "Import" ? (
@@ -1330,7 +1562,7 @@ export default function Home() {
               </Button>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {state.documents.map((doc) => (
+              {operationalDocuments.map((doc) => (
                 <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />
               ))}
             </div>
@@ -1347,7 +1579,7 @@ export default function Home() {
               <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
                 <h2 className="text-lg font-bold">Shortage and investigation cases</h2>
                 <div className="mt-4 space-y-3">
-                  {state.mismatches.map((item) => (
+                  {operationalMismatches.map((item) => (
                     <div key={item.id} className="rounded-lg border border-slate-200 p-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="font-bold">{item.id}</div>
@@ -1366,6 +1598,37 @@ export default function Home() {
         {view === "Audit" ? (
           <ReportTable title="User activity and audit logs" rows={state.audit.map((item) => ({ time: item.time, user: state.users.find((entry) => entry.id === item.userId)?.name, role: item.role, action: item.action, barcode: item.barcode, document: item.documentRef, old: item.oldValue, new: item.newValue, reason: item.reason }))} />
         ) : null}
+
+        {view === "Demo Data" ? (
+          <DemoDataManager
+            mode={state.settings.mode}
+            goLiveAt={state.settings.goLiveAt}
+            demoCounts={demoCounts}
+            demoProducts={state.products.filter(isDemoRecord)}
+            demoCartons={state.cartons.filter(isDemoRecord)}
+            demoDocuments={state.documents.filter(isDemoRecord)}
+            onSetMode={setSystemMode}
+            onArchive={(reason) => setDemoArchived(true, reason)}
+            onRestore={(reason) => setDemoArchived(false, reason)}
+            onDelete={deleteDemoDataPermanently}
+            onGoLive={goLive}
+          />
+        ) : null}
+
+        {view === "Checklist" ? (
+          <PreLaunchChecklist
+            supabaseStatus={supabaseStatus}
+            mode={state.settings.mode}
+            hasRealProducts={state.products.some((item) => item.dataOrigin === "real" && !item.archived)}
+            hasRealCartons={state.cartons.some((item) => item.dataOrigin === "real" && !item.archived)}
+            hasDispatch={operationalDocuments.some((item) => item.type.includes("Dispatch"))}
+            hasReceiving={operationalDocuments.some((item) => item.type.includes("Receiving"))}
+            hasTransfer={operationalDocuments.some((item) => item.type.includes("Transfer"))}
+            hasReports={operationalDocuments.some((item) => item.type.includes("Report"))}
+            hasPdfDocuments={operationalDocuments.length > 0}
+            hasBarcodeData={operationalCartons.length > 0}
+          />
+        ) : null}
       </div>
     </main>
   );
@@ -1379,6 +1642,151 @@ function AlertPanel({ title, items }: { title: string; items: string[] }) {
         {items.length ? items.map((item) => <div key={item} className="rounded-md bg-slate-50 p-2 text-sm text-slate-700">{item}</div>) : <EmptyState text="Nothing pending." compact />}
       </div>
     </div>
+  );
+}
+
+function DemoDataManager({
+  mode,
+  goLiveAt,
+  demoCounts,
+  demoProducts,
+  demoCartons,
+  demoDocuments,
+  onSetMode,
+  onArchive,
+  onRestore,
+  onDelete,
+  onGoLive,
+}: {
+  mode: AppMode;
+  goLiveAt?: string;
+  demoCounts: { products: number; cartons: number; sessions: number; documents: number; mismatches: number; archived: number };
+  demoProducts: Product[];
+  demoCartons: Carton[];
+  demoDocuments: DocumentRecord[];
+  onSetMode: (mode: AppMode) => void;
+  onArchive: (reason: string) => void;
+  onRestore: (reason: string) => void;
+  onDelete: (reason: string) => void;
+  onGoLive: (reason: string) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const demoTotal = demoCounts.products + demoCounts.cartons + demoCounts.sessions + demoCounts.documents + demoCounts.mismatches;
+  return (
+    <section className="grid gap-5">
+      <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold">System Mode</h2>
+            <p className="mt-1 text-sm text-slate-600">Development Mode keeps UAT demo workflows visible. Production Mode hides demo operational records and shows only real business data.</p>
+          </div>
+          <span className={`rounded-lg px-3 py-2 text-sm font-bold ${mode === "development" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
+            {mode === "development" ? "Development Mode" : "Production Mode"}
+          </span>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button variant={mode === "development" ? "primary" : "secondary"} onClick={() => onSetMode("development")}>Development Mode</Button>
+          <Button variant={mode === "production" ? "primary" : "secondary"} onClick={() => onSetMode("production")}>Production Mode</Button>
+        </div>
+        {goLiveAt ? <div className="mt-3 rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">Go Live completed at {new Date(goLiveAt).toLocaleString()}</div> : null}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+        <Stat label="Demo products" value={demoCounts.products} />
+        <Stat label="Demo cartons" value={demoCounts.cartons} />
+        <Stat label="Demo sessions" value={demoCounts.sessions} />
+        <Stat label="Demo documents" value={demoCounts.documents} />
+        <Stat label="Demo cases" value={demoCounts.mismatches} />
+        <Stat label="Archived demo" value={demoCounts.archived} tone={demoCounts.archived ? "amber" : "slate"} />
+      </div>
+
+      <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+        <h2 className="text-lg font-bold">Production Cutover Tool</h2>
+        <p className="mt-1 text-sm text-slate-600">Go Live archives demo inventory, products, dispatches, reports, and mismatch cases, then switches to Production Mode. Users, warehouses, barcode templates, audit logs, and configuration are preserved.</p>
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto_auto_auto]">
+          <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reason for demo data action" className="min-h-11 rounded-lg border border-slate-300 px-3 text-sm" />
+          <Button variant="secondary" disabled={!reason.trim() || demoTotal === 0} onClick={() => onArchive(reason)}>Archive Demo Data</Button>
+          <Button variant="secondary" disabled={!reason.trim() || demoTotal === 0} onClick={() => onRestore(reason)}>Restore Demo Data</Button>
+          <Button disabled={!reason.trim()} onClick={() => onGoLive(reason)}><CheckCircle2 size={18} /> Go Live</Button>
+          <Button variant="danger" disabled={!reason.trim() || demoTotal === 0} onClick={() => onDelete(reason)}>Delete Permanently</Button>
+        </div>
+      </section>
+
+      <section className="grid gap-5 xl:grid-cols-3">
+        <DemoList title="Demo Products" rows={demoProducts.map((item) => `${item.archived ? "[Archived] " : ""}${item.sku} / ${item.flavour} / ${item.caseQty}${item.qtyUnit}`)} />
+        <DemoList title="Demo Inventory" rows={demoCartons.slice(0, 40).map((item) => `${item.archived ? "[Archived] " : ""}${item.barcode} / ${item.status}`)} />
+        <DemoList title="Demo Documents" rows={demoDocuments.map((item) => `${item.archived ? "[Archived] " : ""}${item.id} / ${item.type} / ${item.barcodes.length} cartons`)} />
+      </section>
+    </section>
+  );
+}
+
+function DemoList({ title, rows }: { title: string; rows: string[] }) {
+  return (
+    <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+      <h3 className="font-bold">{title}</h3>
+      <div className="mt-3 max-h-[420px] space-y-2 overflow-auto">
+        {rows.length ? rows.map((row) => <div key={row} className="rounded-lg bg-slate-50 p-2 font-mono text-xs text-slate-700">{row}</div>) : <EmptyState text="No demo records." compact />}
+      </div>
+    </div>
+  );
+}
+
+function PreLaunchChecklist({
+  supabaseStatus,
+  mode,
+  hasRealProducts,
+  hasRealCartons,
+  hasDispatch,
+  hasReceiving,
+  hasTransfer,
+  hasReports,
+  hasPdfDocuments,
+  hasBarcodeData,
+}: {
+  supabaseStatus: "checking" | "connected" | "missing" | "error";
+  mode: AppMode;
+  hasRealProducts: boolean;
+  hasRealCartons: boolean;
+  hasDispatch: boolean;
+  hasReceiving: boolean;
+  hasTransfer: boolean;
+  hasReports: boolean;
+  hasPdfDocuments: boolean;
+  hasBarcodeData: boolean;
+}) {
+  const checks = [
+    { label: "Supabase connected", ok: supabaseStatus === "connected", detail: supabaseStatus },
+    { label: "Inventory working", ok: hasRealCartons || hasBarcodeData, detail: hasRealCartons ? "Real inventory present" : "Demo/UAT inventory present" },
+    { label: "Dispatch working", ok: hasDispatch, detail: "Dispatch slip/session exists" },
+    { label: "Receiving working", ok: hasReceiving, detail: hasReceiving ? "Receiving document exists" : "Run a receiving UAT flow" },
+    { label: "Transfers working", ok: hasTransfer, detail: hasTransfer ? "Transfer document exists" : "Run a transfer UAT flow" },
+    { label: "Reports working", ok: hasReports, detail: "Report documents available" },
+    { label: "PDF generation working", ok: hasPdfDocuments, detail: "Document records can generate PDFs" },
+    { label: "Barcode scanning working", ok: hasBarcodeData, detail: "Barcode registry/cartons available" },
+    { label: "Production mode ready", ok: mode === "production" && hasRealProducts, detail: mode === "production" ? "Production Mode active" : "Still in Development Mode" },
+  ];
+  return (
+    <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold">Pre-launch Checklist</h2>
+          <p className="mt-1 text-sm text-slate-600">Use this during UAT. A red item means the workflow still needs real-data testing before cutover.</p>
+        </div>
+        <span className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold text-slate-700">{checks.filter((item) => item.ok).length}/{checks.length} ready</span>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {checks.map((item) => (
+          <div key={item.label} className={`rounded-lg border p-3 ${item.ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+            <div className="flex items-center gap-2 font-bold">
+              {item.ok ? <CheckCircle2 size={18} className="text-emerald-700" /> : <AlertTriangle size={18} className="text-amber-700" />}
+              {item.label}
+            </div>
+            <div className="mt-1 text-sm text-slate-600">{item.detail}</div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

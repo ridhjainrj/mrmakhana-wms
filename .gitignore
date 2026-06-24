@@ -45,3 +45,4 @@ next-env.d.ts
 # supabase local state
 .supabase-db-password.local
 supabase/.temp/
+.env*

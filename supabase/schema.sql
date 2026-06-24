@@ -25,6 +25,13 @@ create table public.warehouses (
   created_at timestamptz not null default now()
 );
 
+create table public.system_settings (
+  key text primary key,
+  value jsonb not null,
+  updated_by uuid references auth.users(id),
+  updated_at timestamptz not null default now()
+);
+
 create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null,
@@ -50,6 +57,8 @@ create table public.products (
   hsn text,
   status text not null default 'Active' check (status in ('Active', 'Blocked')),
   barcode_template text not null default '{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}',
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_by uuid references public.profiles(id),
   created_at timestamptz not null default now()
 );
@@ -73,6 +82,8 @@ create table public.cartons (
   current_status public.carton_status not null,
   customer text,
   blocked_reason text,
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -90,6 +101,8 @@ create table public.scan_sessions (
   expected_barcodes text[] not null default '{}',
   scanned_barcodes text[] not null default '{}',
   finalized boolean not null default false,
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_by uuid not null references public.profiles(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -107,6 +120,8 @@ create table public.documents (
   notes text,
   discrepancy text,
   barcode_values text[] not null default '{}',
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_by uuid references public.profiles(id),
   approver uuid references public.profiles(id),
   created_at timestamptz not null default now()
@@ -121,6 +136,8 @@ create table public.mismatch_cases (
   duplicate_barcodes text[] not null default '{}',
   reason text,
   approved_by uuid references public.profiles(id),
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -179,6 +196,7 @@ as $$
 $$;
 
 alter table public.warehouses enable row level security;
+alter table public.system_settings enable row level security;
 alter table public.profiles enable row level security;
 alter table public.products enable row level security;
 alter table public.cartons enable row level security;
@@ -189,6 +207,9 @@ alter table public.audit_logs enable row level security;
 
 create policy "read warehouses" on public.warehouses for select to authenticated using (true);
 create policy "manage warehouses" on public.warehouses for all to authenticated using (public.current_role() = 'Admin') with check (public.current_role() = 'Admin');
+
+create policy "read system settings" on public.system_settings for select to authenticated using (true);
+create policy "admin manages system settings" on public.system_settings for all to authenticated using (public.current_role() = 'Admin') with check (public.current_role() = 'Admin');
 
 create policy "read own profile or privileged" on public.profiles for select to authenticated using (id = auth.uid() or public.current_role() in ('Admin', 'Accountant'));
 create policy "admin manages profiles" on public.profiles for all to authenticated using (public.current_role() = 'Admin') with check (public.current_role() = 'Admin');
@@ -237,3 +258,8 @@ insert into public.warehouses (name, type) values
   ('Mumbai Warehouse', 'warehouse'),
   ('In Transit', 'transit')
 on conflict (name) do nothing;
+
+insert into public.system_settings (key, value) values
+  ('app_mode', '{"mode":"development","phase":"uat"}'::jsonb),
+  ('supabase_project_ref', '{"project_ref":"yagdnrnfqbqcqgcbejuc"}'::jsonb)
+on conflict (key) do nothing;
