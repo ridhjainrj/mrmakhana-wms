@@ -1,33 +1,43 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import {
   AlertTriangle,
   Archive,
   ArrowRightLeft,
   BarChart3,
+  Boxes,
+  Building2,
   Camera,
   CheckCircle2,
   ClipboardCheck,
+  Database,
   Download,
   FileText,
   History,
   Lock,
   LogOut,
+  MapPin,
+  Menu,
   PackageCheck,
   Printer,
   QrCode,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   Truck,
   Upload,
+  UserCog,
+  Users,
   Warehouse,
   XCircle,
 } from "lucide-react";
 import jsPDF from "jspdf";
 import QRCode from "qrcode";
 import { readSheet } from "read-excel-file/browser";
+import { Button, Card, EmptyState, SelectField, Stat, StatusBadge, Tag, TextField } from "@/components/wms/ui";
 import {
   barcodeTemplate,
   buildBarcodeFromTemplate,
@@ -214,6 +224,58 @@ type MismatchCase = {
   archived?: boolean;
 };
 
+type PermissionAction = "view" | "create" | "edit" | "archive" | "delete" | "approve" | "export" | "import";
+type MasterStatus = "Active" | "Inactive" | "Archived";
+type MasterKey =
+  | "roles"
+  | "customers"
+  | "transporters"
+  | "vehicles"
+  | "drivers"
+  | "approvalReasons"
+  | "adjustmentReasons"
+  | "damageReasons"
+  | "numberingSeries";
+
+type MasterRecord = {
+  id: string;
+  name: string;
+  code: string;
+  status: MasterStatus;
+  description?: string;
+  owner?: string;
+  updatedAt: string;
+  archived?: boolean;
+};
+
+type PermissionGrant = {
+  role: Role;
+  module: string;
+  actions: PermissionAction[];
+};
+
+type ManagementSettings = {
+  defaultFactory: string;
+  defaultWarehouse: string;
+  stockRule: "FEFO" | "FIFO";
+  nearExpiryWarningDays: number;
+  autoFocusScanner: boolean;
+  scannerSounds: boolean;
+  autoRegisterCartonOnFirstScan: boolean;
+  requiredDispatchFields: string[];
+  requiredReceivingFields: string[];
+  twoLevelApprovals: boolean;
+  barcodeFormatDefault: string;
+  cartonNumberLength: number;
+  documentPrefixes: Record<string, string>;
+};
+
+type ManagementConfig = {
+  masters: Record<MasterKey, MasterRecord[]>;
+  permissions: PermissionGrant[];
+  settings: ManagementSettings;
+};
+
 type AppState = {
   settings: {
     mode: AppMode;
@@ -230,6 +292,7 @@ type AppState = {
   audit: AuditLog[];
   registry: Carton[];
   barcodePatterns: BarcodePattern[];
+  managementConfig: ManagementConfig;
 };
 
 type ImportPreviewRow = {
@@ -291,6 +354,115 @@ function buildPattern(product: Product, batchPattern = "{BATCH}", exampleBatch =
   };
 }
 
+const permissionModules = [
+  "Dashboard",
+  "Dispatches",
+  "Scan",
+  "Inventory",
+  "Receiving",
+  "Shipments",
+  "Factory Management",
+  "Warehouse Management",
+  "Products",
+  "Customers",
+  "Users",
+  "Locations",
+  "Import Data",
+  "Documents",
+  "Reports",
+  "Audit Logs",
+  "Demo / Production Mode",
+  "Checklist",
+  "Settings",
+];
+
+const permissionActions: PermissionAction[] = ["view", "create", "edit", "archive", "delete", "approve", "export", "import"];
+
+function masterRecord(name: string, code: string, description = "", owner = "System"): MasterRecord {
+  return { id: uid("master"), name, code, description, owner, status: "Active", updatedAt: now() };
+}
+
+function defaultPermissions(): PermissionGrant[] {
+  return (["Admin", "Accountant", "Warehouse Manager", "Operator", "Viewer"] as Role[]).flatMap((role) =>
+    permissionModules.map((module) => {
+      const actions: PermissionAction[] =
+        role === "Admin"
+          ? [...permissionActions]
+          : role === "Accountant"
+            ? ["view", "approve", "export"]
+            : role === "Warehouse Manager"
+              ? ["view", "create", "edit", "approve", "export"]
+              : role === "Operator"
+                ? module === "Scan" || ["Dispatches", "Receiving", "Shipments", "Inventory"].includes(module)
+                  ? ["view", "create"]
+                  : []
+                : ["view", "export"];
+      return { role, module, actions };
+    }),
+  );
+}
+
+function defaultManagementConfig(): ManagementConfig {
+  return {
+    masters: {
+      roles: [
+        masterRecord("Admin", "ADMIN", "Full system access"),
+        masterRecord("Accountant", "ACCT", "Approvals and financial reports"),
+        masterRecord("Warehouse Manager", "WHM", "Warehouse operations"),
+        masterRecord("Operator", "OPER", "Scanner and floor workflows"),
+        masterRecord("Viewer", "VIEW", "Read-only management visibility"),
+      ],
+      customers: [masterRecord("Modern Trade Customer", "CUST-MODERN", "Default customer dispatch account")],
+      transporters: [masterRecord("Primary Transporter", "TRN-PRIMARY", "Default logistics partner")],
+      vehicles: [masterRecord("Default Vehicle", "VEH-001", "Use only for UAT workflows")],
+      drivers: [masterRecord("Default Driver", "DRV-001", "Use only for UAT workflows")],
+      approvalReasons: [
+        masterRecord("Physical shortage verified", "APR-SHORTAGE"),
+        masterRecord("Supervisor exception approval", "APR-EXCEPTION"),
+      ],
+      adjustmentReasons: [
+        masterRecord("Cycle count correction", "ADJ-CYCLE"),
+        masterRecord("Opening balance correction", "ADJ-OPENING"),
+      ],
+      damageReasons: [
+        masterRecord("Transit damage", "DMG-TRANSIT"),
+        masterRecord("Warehouse handling damage", "DMG-HANDLING"),
+      ],
+      numberingSeries: [
+        masterRecord("Dispatch Slip", "DSP", "Factory and customer dispatch series"),
+        masterRecord("Receiving Slip", "RCV", "Warehouse receiving series"),
+        masterRecord("Transfer Slip", "TRF", "Warehouse transfer series"),
+        masterRecord("Batch Slip", "BAT", "Production batch series"),
+      ],
+    },
+    permissions: defaultPermissions(),
+    settings: {
+      defaultFactory: "factory",
+      defaultWarehouse: "delhi",
+      stockRule: "FEFO",
+      nearExpiryWarningDays: 45,
+      autoFocusScanner: true,
+      scannerSounds: true,
+      autoRegisterCartonOnFirstScan: true,
+      requiredDispatchFields: ["vehicle", "driver", "destinationWarehouseId"],
+      requiredReceivingFields: ["sourceSessionId"],
+      twoLevelApprovals: true,
+      barcodeFormatDefault: barcodeTemplate,
+      cartonNumberLength: 5,
+      documentPrefixes: { batch: "BAT", dispatch: "DSP", receiving: "RCV", transfer: "TRF", customerDispatch: "CUS", damage: "DMG", shortage: "SHR", adjustment: "ADJ" },
+    },
+  };
+}
+
+function normalizeManagementConfig(raw?: Partial<ManagementConfig>): ManagementConfig {
+  const defaults = defaultManagementConfig();
+  return {
+    masters: { ...defaults.masters, ...(raw?.masters ?? {}) },
+    permissions: raw?.permissions?.length ? raw.permissions : defaults.permissions,
+    settings: { ...defaults.settings, ...(raw?.settings ?? {}) },
+  };
+}
+
 function emptyState(): AppState {
   return {
     settings: { mode: "development", supabaseProjectRef: "yagdnrnfqbqcqgcbejuc" },
@@ -304,10 +476,17 @@ function emptyState(): AppState {
     audit: [],
     registry: [],
     barcodePatterns: [],
+    managementConfig: defaultManagementConfig(),
   };
 }
 function can(user: User, action: "manage" | "sensitive" | "scan" | "view") {
   return canRole(user.role, action);
+}
+
+function hasPermission(state: AppState, user: User, module: string, action: PermissionAction) {
+  if (user.role === "Admin") return true;
+  const grant = state.managementConfig.permissions.find((item) => item.role === user.role && item.module === module);
+  return Boolean(grant?.actions.includes(action));
 }
 
 function isOperationalRecord(record: { dataOrigin?: DataOrigin; archived?: boolean }, mode: AppMode) {
@@ -318,82 +497,6 @@ function isOperationalRecord(record: { dataOrigin?: DataOrigin; archived?: boole
 
 function isDemoRecord(record: { dataOrigin?: DataOrigin }) {
   return record.dataOrigin === "demo";
-}
-
-function Button({
-  children,
-  onClick,
-  variant = "primary",
-  disabled = false,
-  type = "button",
-  className = "",
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  variant?: "primary" | "secondary" | "danger" | "ghost";
-  disabled?: boolean;
-  type?: "button" | "submit";
-  className?: string;
-}) {
-  const styles = {
-    primary: "bg-emerald-700 text-white hover:bg-emerald-800",
-    secondary: "border border-slate-300 bg-white text-slate-900 hover:bg-slate-50",
-    danger: "bg-rose-700 text-white hover:bg-rose-800",
-    ghost: "text-slate-700 hover:bg-slate-100",
-  };
-  return (
-    <button
-      type={type}
-      disabled={disabled}
-      onClick={onClick}
-      className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Stat({ label, value, tone = "slate" }: { label: string; value: string | number; tone?: "slate" | "emerald" | "amber" | "rose" }) {
-  const toneMap = {
-    slate: "border-slate-200 bg-white",
-    emerald: "border-emerald-200 bg-emerald-50",
-    amber: "border-amber-200 bg-amber-50",
-    rose: "border-rose-200 bg-rose-50",
-  };
-  return (
-    <div className={`rounded-lg border p-4 ${toneMap[tone]}`}>
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="mt-2 text-2xl font-bold text-slate-950">{value}</div>
-    </div>
-  );
-}
-
-function TextField(props: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) {
-  const { label, className, ...rest } = props;
-  return (
-    <label className="grid gap-1 text-sm font-semibold text-slate-700">
-      {label}
-      <input
-        {...rest}
-        className={`min-h-11 rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-950 outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100 ${className ?? ""}`}
-      />
-    </label>
-  );
-}
-
-function SelectField(props: React.SelectHTMLAttributes<HTMLSelectElement> & { label: string; children: React.ReactNode }) {
-  const { label, children, className, ...rest } = props;
-  return (
-    <label className="grid gap-1 text-sm font-semibold text-slate-700">
-      {label}
-      <select
-        {...rest}
-        className={`min-h-11 rounded-lg border border-slate-300 bg-white px-3 text-base text-slate-950 outline-none focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100 ${className ?? ""}`}
-      >
-        {children}
-      </select>
-    </label>
-  );
 }
 
 export default function Home() {
@@ -430,7 +533,7 @@ export default function Home() {
       })
       .then((data) => {
         if (cancelled) return;
-        const next = { ...data, registry: data.cartons, barcodePatterns: data.barcodePatterns ?? [] };
+        const next = { ...data, registry: data.cartons, barcodePatterns: data.barcodePatterns ?? [], managementConfig: normalizeManagementConfig(data.managementConfig) };
         setState(next);
         setActiveUserId("");
         setBackendStatus("ready");
@@ -601,7 +704,7 @@ export default function Home() {
       dataOrigin: source?.dataOrigin ?? (state.settings.mode === "production" ? "real" : "demo"),
     });
     setScanMessage(null);
-    setView("Scanning");
+    setView("Scan");
   }
 
   function validateScan(barcode: string, activeSession: ScanSession) {
@@ -689,7 +792,7 @@ export default function Home() {
     const draft = state.sessions.find((item) => item.id === id && !item.finalized);
     if (draft) {
       setSession(draft);
-      setView("Scanning");
+      setView("Scan");
     }
   }
 
@@ -1256,63 +1359,133 @@ export default function Home() {
     });
   }
 
+  function addMasterRecord(masterKey: MasterKey, form: FormData) {
+    if (!user || !hasPermission(state, user, "Settings", "create")) return;
+    const name = String(form.get("name") ?? "").trim();
+    const code = String(form.get("code") ?? "").trim().toUpperCase();
+    if (!name || !code) return;
+    mutate((draft) => {
+      const list = draft.managementConfig.masters[masterKey] ?? [];
+      if (list.some((item) => item.code.toLowerCase() === code.toLowerCase())) return;
+      list.unshift(masterRecord(name, code, String(form.get("description") ?? ""), user.name));
+      draft.managementConfig.masters[masterKey] = list;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Master data created", newValue: `${masterKey}:${code}` });
+    });
+  }
+
+  function setMasterStatus(masterKey: MasterKey, id: string, status: MasterStatus) {
+    if (!user || !hasPermission(state, user, "Settings", "archive")) return;
+    mutate((draft) => {
+      const record = draft.managementConfig.masters[masterKey]?.find((item) => item.id === id);
+      if (!record) return;
+      const oldValue = record.status;
+      record.status = status;
+      record.archived = status === "Archived";
+      record.updatedAt = now();
+      record.owner = user.name;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Master data status changed", oldValue, newValue: `${record.code}:${status}` });
+    });
+  }
+
+  function togglePermission(role: Role, module: string, action: PermissionAction) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      let grant = draft.managementConfig.permissions.find((item) => item.role === role && item.module === module);
+      if (!grant) {
+        grant = { role, module, actions: [] };
+        draft.managementConfig.permissions.push(grant);
+      }
+      grant.actions = grant.actions.includes(action) ? grant.actions.filter((item) => item !== action) : [...grant.actions, action];
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Permission updated", newValue: `${role}:${module}:${action}` });
+    });
+  }
+
+  function updateManagementSettings(form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      draft.managementConfig.settings = {
+        ...draft.managementConfig.settings,
+        defaultFactory: String(form.get("defaultFactory") || draft.managementConfig.settings.defaultFactory),
+        defaultWarehouse: String(form.get("defaultWarehouse") || draft.managementConfig.settings.defaultWarehouse),
+        stockRule: String(form.get("stockRule")) === "FIFO" ? "FIFO" : "FEFO",
+        nearExpiryWarningDays: Number(form.get("nearExpiryWarningDays") || 45),
+        autoFocusScanner: form.get("autoFocusScanner") === "on",
+        scannerSounds: form.get("scannerSounds") === "on",
+        autoRegisterCartonOnFirstScan: form.get("autoRegisterCartonOnFirstScan") === "on",
+        twoLevelApprovals: form.get("twoLevelApprovals") === "on",
+        barcodeFormatDefault: String(form.get("barcodeFormatDefault") || barcodeTemplate),
+        cartonNumberLength: Number(form.get("cartonNumberLength") || 5),
+        documentPrefixes: {
+          ...draft.managementConfig.settings.documentPrefixes,
+          dispatch: String(form.get("dispatchPrefix") || "DSP"),
+          receiving: String(form.get("receivingPrefix") || "RCV"),
+          transfer: String(form.get("transferPrefix") || "TRF"),
+          batch: String(form.get("batchPrefix") || "BAT"),
+        },
+      };
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "System settings updated", newValue: "Management settings" });
+    });
+  }
+
   if (backendStatus === "loading") {
     return (
-      <main className="grid min-h-screen place-items-center bg-slate-100 px-4 text-slate-950">
-        <section className="w-full max-w-md rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <div className="inline-flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
+      <main className="ds-login text-[var(--text-strong)]">
+        <Card className="w-full max-w-md">
+          <div className="inline-flex items-center gap-2 rounded-xl bg-[var(--blue-50)] px-3 py-2 text-sm font-bold text-[var(--blue-700)]">
             <ShieldCheck size={18} /> Mr Makhana WMS
           </div>
           <h1 className="mt-6 text-2xl font-bold">Loading Supabase data</h1>
-          <p className="mt-2 text-sm text-slate-600">{backendMessage}</p>
-        </section>
+          <p className="mt-2 text-sm text-[var(--text-muted)]">{backendMessage}</p>
+        </Card>
       </main>
     );
   }
 
   if (backendStatus === "error" && !state.users.length) {
     return (
-      <main className="grid min-h-screen place-items-center bg-slate-100 px-4 text-slate-950">
-        <section className="w-full max-w-md rounded-xl bg-white p-6 shadow-sm ring-1 ring-rose-200">
+      <main className="ds-login text-[var(--text-strong)]">
+        <Card className="w-full max-w-md border-rose-200">
           <div className="inline-flex items-center gap-2 rounded-lg bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800">
             <AlertTriangle size={18} /> Supabase unavailable
           </div>
           <h1 className="mt-6 text-2xl font-bold">Database load failed</h1>
-          <p className="mt-2 text-sm text-slate-600">{backendMessage}</p>
-        </section>
+          <p className="mt-2 text-sm text-[var(--text-muted)]">{backendMessage}</p>
+        </Card>
       </main>
     );
   }
 
   if (!user) {
     return (
-      <main className="min-h-screen bg-slate-100 px-4 py-8 text-slate-950">
-        <section className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="flex min-h-[520px] flex-col justify-between rounded-xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
+      <main className="ds-login text-[var(--text-strong)]">
+        <section className="ds-login__grid">
+          <div className="ds-login__hero">
             <div>
-              <div className="inline-flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
-                <ShieldCheck size={18} /> Mr Makhana WMS
-              </div>
-              <h1 className="mt-8 max-w-xl text-4xl font-bold leading-tight text-slate-950">Carton-level warehouse control for scanning, dispatch, receiving, transfer, and audit.</h1>
-              <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600">
+              <Image src="/logo-makhana-white.png" alt="Mr Makhana" width={190} height={72} className="h-14 w-auto" priority />
+              <div className="ds-eyebrow mt-8">Warehouse Operating System</div>
+              <h1 className="ds-display">Carton-level control for scanning, dispatch, receiving and audit.</h1>
+              <p className="ds-muted-on-brand mt-4">
                 Development Mode is seeded with role-based users, warehouses, cartons, dispatches, mismatch cases, reports, and document slips. Production Mode hides demo operational data for cutover.
               </p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Stat label="Inventory rule" value="Scan only" tone="emerald" />
-              <Stat label="Tracking" value="Carton" />
-              <Stat label="Roles" value="5" tone="amber" />
+            <div className="ds-login__metrics">
+              {[["Tracking", "Carton"], ["Inventory rule", "Scan only"], ["Roles", "5"]].map(([label, value]) => (
+                <div key={label} className="ds-glass">
+                  <div className="ds-glass__label">{label}</div>
+                  <div className="ds-glass__value">{value}</div>
+                </div>
+              ))}
             </div>
           </div>
-          <form
-            className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200"
-            onSubmit={(event) => {
-              event.preventDefault();
-              login();
-            }}
-          >
-            <h2 className="text-2xl font-bold">Sign in</h2>
-            <p className="mt-2 text-sm text-slate-600">{state.settings.mode === "development" ? "Use one of the seeded internal test accounts." : "Production Mode is active. Test account shortcuts are hidden."}</p>
+          <Card>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                login();
+              }}
+            >
+            <h2 className="m-0 text-[22px] font-extrabold text-[var(--text-strong)]">Sign in</h2>
+            <p className="mt-2 text-sm text-[var(--text-muted)]">{state.settings.mode === "development" ? "Use one of the seeded internal test accounts." : "Production Mode is active. Test account shortcuts are hidden."}</p>
             <div className="mt-6 grid gap-4">
               <TextField label="Email" value={email} onChange={(event) => setEmail(event.target.value)} />
               <TextField label="Password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
@@ -1321,183 +1494,370 @@ export default function Home() {
                 <Lock size={18} /> Sign in
               </Button>
             </div>
-            {state.settings.mode === "development" ? <div className="mt-6 space-y-2 text-xs text-slate-600">
+            {state.settings.mode === "development" ? <div className="mt-6 space-y-2 text-xs text-[var(--text-muted)]">
+              <div className="mb-2 text-[11px] font-extrabold uppercase tracking-[0.06em] text-[var(--text-faint)]">Seeded accounts</div>
               {state.users.map((item) => (
                 <button
                   type="button"
                   key={item.id}
-                  className="flex w-full items-center justify-between rounded-lg border border-slate-200 p-2 text-left hover:bg-slate-50"
+                  className="flex w-full items-center justify-between rounded-[10px] border border-[var(--border-subtle)] bg-white px-3 py-2.5 text-left transition hover:bg-[var(--blue-50)]"
                   onClick={() => {
                     setEmail(item.email);
                     setPassword(item.password);
                   }}
                 >
-                  <span className="font-semibold text-slate-800">{item.role}</span>
-                  <span>{item.email}</span>
+                  <span>
+                    <span className="block text-sm font-bold text-[var(--text-strong)]">{item.name}</span>
+                    <span className="text-[11px]">{item.email}</span>
+                  </span>
+                  <Tag tone="brand">{item.role}</Tag>
                 </button>
               ))}
             </div> : null}
-          </form>
+            </form>
+          </Card>
         </section>
       </main>
     );
   }
 
-  const nav = [
-    ["Dashboard", BarChart3, true],
-    ["Scanning", QrCode, can(user, "scan")],
-    ["Products", Archive, can(user, "sensitive")],
-    ["Import", Upload, can(user, "sensitive")],
-    ["Documents", FileText, can(user, "view")],
-    ["Reports", Warehouse, can(user, "view")],
-    ["Audit", History, user.role !== "Operator"],
-    ["Demo Data", Settings, user.role === "Admin"],
-    ["Checklist", ClipboardCheck, user.role === "Admin"],
-  ] as const;
+  const navGroups = [
+    {
+      title: "Operations",
+      items: [
+        { label: "Dashboard", icon: BarChart3, show: hasPermission(state, user, "Dashboard", "view") },
+        { label: "Dispatches", icon: Truck, show: hasPermission(state, user, "Dispatches", "view") },
+        { label: "Scan", icon: QrCode, show: hasPermission(state, user, "Scan", "view") },
+        { label: "Inventory", icon: Boxes, show: hasPermission(state, user, "Inventory", "view") },
+        { label: "Receiving", icon: PackageCheck, show: hasPermission(state, user, "Receiving", "view") },
+        { label: "Shipments", icon: Send, show: hasPermission(state, user, "Shipments", "view") },
+      ],
+    },
+    {
+      title: "Management",
+      items: [
+        { label: "Factory Management", icon: Building2, show: hasPermission(state, user, "Factory Management", "view") },
+        { label: "Warehouse Management", icon: Warehouse, show: hasPermission(state, user, "Warehouse Management", "view") },
+        { label: "Products", icon: Archive, show: hasPermission(state, user, "Products", "view") },
+        { label: "Customers", icon: Users, show: hasPermission(state, user, "Customers", "view") },
+        { label: "Users", icon: UserCog, show: hasPermission(state, user, "Users", "view") },
+        { label: "Locations", icon: MapPin, show: hasPermission(state, user, "Locations", "view") },
+      ],
+    },
+    {
+      title: "System",
+      items: [
+        { label: "Import Data", icon: Upload, show: hasPermission(state, user, "Import Data", "view") },
+        { label: "Documents", icon: FileText, show: hasPermission(state, user, "Documents", "view") },
+        { label: "Reports", icon: BarChart3, show: hasPermission(state, user, "Reports", "view") },
+        { label: "Audit Logs", icon: History, show: hasPermission(state, user, "Audit Logs", "view") },
+        { label: "Demo / Production Mode", icon: Settings, show: hasPermission(state, user, "Demo / Production Mode", "view") },
+        { label: "Checklist", icon: ClipboardCheck, show: hasPermission(state, user, "Checklist", "view") },
+        { label: "Settings", icon: Database, show: hasPermission(state, user, "Settings", "view") },
+      ],
+    },
+  ];
 
   const visibleCartons = operationalCartons.filter((carton) => {
     if (user.role === "Admin" || user.role === "Accountant") return true;
     return carton.warehouseId === user.warehouseId || carton.status.includes("IN_TRANSIT");
   });
-  const searchMatches = search.trim()
-    ? operationalCartons.filter((carton) => carton.barcode.toLowerCase().includes(search.toLowerCase()) || carton.sku.toLowerCase().includes(search.toLowerCase()) || carton.batch.toLowerCase().includes(search.toLowerCase()))
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const todaysDispatches = operationalDocuments.filter((doc) => doc.type.includes("Dispatch") && doc.createdAt.slice(0, 10) === todayKey).length;
+  const factoryCartons = visibleCartons.filter((carton) => carton.warehouseId === factoryWarehouseId || carton.status === "IN_FACTORY");
+  const warehouseCartons = visibleCartons.filter((carton) => state.warehouses.find((warehouse) => warehouse.id === carton.warehouseId)?.type === "warehouse");
+  const customerDispatches = operationalDocuments.filter((doc) => doc.type.includes("Customer"));
+  const receivingDocuments = operationalDocuments.filter((doc) => doc.type.includes("Receive") || doc.type.includes("Receiving"));
+  const dispatchDocuments = operationalDocuments.filter((doc) => doc.type.includes("Dispatch"));
+  const navItems = navGroups.flatMap((group) => group.items);
+  const currentPage = navItems.find((item) => item.label === view) ?? navItems[0];
+  const pageSubtitles: Record<string, string> = {
+    Dashboard: "A clear operating picture for today’s warehouse activity.",
+    Dispatches: "Factory and customer dispatch work in one place.",
+    Scan: "Large-button scanning for warehouse floor workflows.",
+    Inventory: "Live carton-level stock across all accessible locations.",
+    Receiving: "Inbound warehouse receiving and missing-carton follow-up.",
+    Shipments: "Customer dispatches, outbound cartons, and shipment documents.",
+    "Factory Management": "Factory stock, production batches, and dispatch readiness.",
+    "Warehouse Management": "Warehouse stock, receiving, transfers, and customer dispatch.",
+    Products: "Product master, barcode patterns, and carton range generation.",
+    Customers: "Customer dispatch visibility derived from shipment records.",
+    Users: "Role-based users and warehouse assignments.",
+    Locations: "Factory, warehouse, and transit location analytics.",
+    "Import Data": "Excel SKU master import with validation and duplicate checks.",
+    Documents: "Dispatch, receiving, transfer, and batch slips.",
+    Reports: "Operational reports generated from Supabase-backed data.",
+    "Audit Logs": "Every sensitive action and carton movement audit trail.",
+    "Demo / Production Mode": "UAT demo controls and production cutover tools.",
+    Checklist: "Pre-launch readiness for Supabase, workflows, PDFs, and scanning.",
+    Settings: "System configuration, mode, and database connection status.",
+  };
+  const searchTerm = search.trim().toLowerCase();
+  const searchMatches = searchTerm
+    ? operationalCartons.filter((carton) => carton.barcode.toLowerCase().includes(searchTerm) || carton.sku.toLowerCase().includes(searchTerm) || carton.batch.toLowerCase().includes(searchTerm))
     : [];
-
+  const globalSearchResults = searchTerm
+    ? [
+        ...searchMatches.map((carton) => ({ type: "Barcode / Carton", title: carton.barcode, detail: `${carton.sku} / ${carton.batch} / ${warehouseById[carton.warehouseId]} / ${carton.status}` })),
+        ...operationalProducts.filter((item) => [item.sku, item.name, item.flavour, item.gtin].join(" ").toLowerCase().includes(searchTerm)).map((item) => ({ type: "Product / SKU", title: item.sku, detail: `${item.name} / ${item.flavour} / ${item.weight}` })),
+        ...state.users.filter((item) => [item.name, item.email, item.role].join(" ").toLowerCase().includes(searchTerm)).map((item) => ({ type: "User", title: item.name, detail: `${item.role} / ${item.email}` })),
+        ...state.warehouses.filter((item) => [item.name, item.type].join(" ").toLowerCase().includes(searchTerm)).map((item) => ({ type: "Warehouse", title: item.name, detail: item.type })),
+        ...operationalDocuments.filter((item) => [item.id, item.type, item.source, item.destination, item.vehicle, item.driver, item.lr].join(" ").toLowerCase().includes(searchTerm)).map((item) => ({ type: "Document", title: item.id, detail: `${item.type} / ${item.source ?? "-"} -> ${item.destination ?? "-"}` })),
+        ...operationalMismatches.filter((item) => [item.id, item.status, item.reason].join(" ").toLowerCase().includes(searchTerm)).map((item) => ({ type: "Investigation Case", title: item.id, detail: `${item.status} / Missing ${item.missing.length}` })),
+      ].slice(0, 12)
+    : [];
   return (
-    <main className="min-h-screen bg-slate-100 text-slate-950">
-      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
+    <main className="os-shell">
+      <aside className="os-sidebar">
+        <div className="os-brand">
+          <span className="os-brand__mark">
+            <Image src="/logo-makhana-white.png" alt="" width={96} height={36} className="h-7 w-auto" />
+          </span>
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-lg font-bold">
-              <PackageCheck className="text-emerald-700" size={24} /> Mr Makhana WMS
-            </div>
-            <div className="truncate text-xs font-semibold text-slate-500">
-              {user.name} / {user.role} / {warehouseById[user.warehouseId]}
-            </div>
-            <div className={`mt-1 inline-flex rounded-md px-2 py-1 text-xs font-bold ${state.settings.mode === "development" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
-              {state.settings.mode === "development" ? "Development Mode" : "Production Mode"}
-            </div>
-            <div className={`mt-1 inline-flex rounded-md px-2 py-1 text-xs font-bold ${backendStatus === "error" ? "bg-rose-100 text-rose-800" : backendStatus === "saving" ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-700"}`}>
-              {backendMessage}
-            </div>
+            <div className="os-brand__title">Mr Makhana</div>
+            <div className="os-brand__sub">Warehouse OS</div>
           </div>
-          <div className="hidden flex-1 items-center justify-end gap-2 md:flex">
-            <div className="relative w-full max-w-md">
-              <Search className="absolute left-3 top-3 text-slate-400" size={18} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Global barcode search" className="h-11 w-full rounded-lg border border-slate-300 bg-white pl-10 pr-3 outline-none focus:border-emerald-700" />
-            </div>
-            <Button variant="ghost" onClick={logout}>
-              <LogOut size={18} /> Logout
-            </Button>
-          </div>
-          <button className="rounded-lg p-2 text-slate-700 md:hidden" onClick={logout} aria-label="Logout">
-            <LogOut size={22} />
-          </button>
         </div>
-        <nav className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-4 pb-3">
-          {nav
-            .filter(([, , show]) => show)
-            .map(([label, Icon]) => (
-              <button key={label} onClick={() => setView(label)} className={`inline-flex min-h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-bold ${view === label ? "bg-emerald-700 text-white" : "bg-slate-100 text-slate-700"}`}>
-                <Icon size={17} /> {label}
-              </button>
-            ))}
-        </nav>
-      </header>
 
-      <div className="mx-auto max-w-7xl px-4 py-5">
-        {searchMatches.length ? (
-          <section className="mb-5 rounded-xl border border-emerald-200 bg-white p-4 shadow-sm">
+        <nav className="os-nav">
+          {navGroups.map((group) => (
+            <div key={group.title} className="os-nav__group">
+              <div className="os-nav__heading">{group.title}</div>
+              <div className="os-nav__items">
+                {group.items.filter((item) => item.show).map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button key={item.label} onClick={() => setView(item.label)} className={`os-nav__item ${view === item.label ? "os-nav__item--active" : ""}`}>
+                      <Icon size={18} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <div className="os-user-card">
+          <div className="os-user-card__name">{user.name}</div>
+          <div className="os-user-card__meta">{user.role}</div>
+          <div className="os-user-card__meta">{warehouseById[user.warehouseId]}</div>
+          <div className="mt-3">
+            <StatusBadge tone={state.settings.mode === "development" ? "amber" : "teal"}>{state.settings.mode === "development" ? "Development" : "Production"}</StatusBadge>
+          </div>
+        </div>
+      </aside>
+
+      <section className="os-main">
+        <header className="os-topbar">
+          <button className="os-mobile-menu" aria-label="Menu"><Menu size={20} /></button>
+          <div className="min-w-0">
+            <div className="os-page-kicker">{currentPage ? currentPage.label : view}</div>
+            <h1 className="os-page-title">{view}</h1>
+            <p className="os-page-subtitle">{pageSubtitles[view] ?? "Warehouse operating tools connected to Supabase."}</p>
+          </div>
+          <div className="os-topbar__tools">
+            <div className="os-search">
+              <Search size={17} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search barcode, SKU, or batch" className="mm-input mm-input--mono" />
+            </div>
+            <Tag tone={backendStatus === "error" ? "neutral" : backendStatus === "saving" ? "brand" : "accent"}>{backendMessage}</Tag>
+            <Button variant="ghost" size="sm" onClick={logout}><LogOut size={18} /> Logout</Button>
+          </div>
+        </header>
+
+        <nav className="os-mobile-nav">
+          {navGroups[0].items.filter((item) => item.show).slice(0, 5).map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.label} onClick={() => setView(item.label)} className={view === item.label ? "os-mobile-nav__active" : ""} aria-label={item.label}>
+                <Icon size={22} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+      <section className="os-content">
+        {globalSearchResults.length ? (
+          <Card className="mb-5 border-[var(--blue-100)]">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-bold">Search results</h2>
+              <h2 className="font-bold">Global search results</h2>
               <Button variant="ghost" onClick={() => setSearch("")}>Clear</Button>
             </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {searchMatches.slice(0, 6).map((carton) => (
-                <CartonRow key={carton.id} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} onReverse={reverseCarton} canReverse={can(user, "sensitive")} />
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {globalSearchResults.map((item) => (
+                <div key={`${item.type}-${item.title}`} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--slate-50)] p-3">
+                  <Tag tone="brand">{item.type}</Tag>
+                  <div className="mt-2 truncate font-bold text-[var(--text-strong)]">{item.title}</div>
+                  <div className="mt-1 truncate text-sm text-[var(--text-muted)]">{item.detail}</div>
+                </div>
               ))}
             </div>
-          </section>
+          </Card>
         ) : null}
 
         {view === "Dashboard" ? (
-          <section className="grid gap-5">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-              <Stat label="Active cartons" value={metrics.cartons} tone="emerald" />
-              <Stat label="Calculated units" value={metrics.units} />
-              <Stat label="In transit" value={metrics.inTransit} tone="amber" />
-              <Stat label="Blocked" value={metrics.blocked} tone="rose" />
-              <Stat label="Near expiry" value={metrics.nearExpiry} tone="amber" />
-              <Stat label="Missing" value={metrics.missing} tone="rose" />
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Today’s dispatches" value={todaysDispatches} tone="warning" />
+              <Stat label="Cartons scanned" value={operationalSessions.reduce((sum, item) => sum + item.scanned.length, 0)} tone="brand" />
+              <Stat label="Active products" value={operationalProducts.length} tone="accent" />
+              <Stat label="Active users" value={state.users.length} />
             </div>
-            <div className="grid gap-5 lg:grid-cols-[1.2fr_0.8fr]">
-              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-lg font-bold">Operational queues</h2>
-                  <Button variant="secondary" onClick={() => exportCsv("inventory-snapshot", visibleCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, batch: carton.batch, warehouse: warehouseById[carton.warehouseId], status: carton.status, expiry: carton.expiry })))}>
-                    <Download size={18} /> CSV
-                  </Button>
+            <RoleWorkspace
+              user={user}
+              metrics={metrics}
+              pendingApprovals={operationalMismatches.filter((item) => item.status === "Open").length}
+              draftSessions={operationalSessions.filter((item) => !item.finalized).length}
+              setView={setView}
+            />
+
+            <div className="ds-two-col">
+              <Card title="Inventory Health" action={<Button variant="secondary" size="sm" onClick={() => setView("Inventory")}><Boxes size={16} /> View inventory</Button>}>
+                <div className="ds-card-grid">
+                  <AlertPanel title="Low stock" items={operationalProducts.map((product) => `${product.sku}: ${visibleCartons.filter((carton) => carton.productId === product.id && !lockedStatuses.includes(carton.status)).length} cartons`)} />
+                  <AlertPanel title="Near-expiry" items={visibleCartons.filter((carton) => daysFrom(carton.expiry) <= 45).slice(0, 6).map((carton) => `${carton.sku} ${carton.cartonNo}: ${daysFrom(carton.expiry)} days`)} />
+                  <AlertPanel title="Pending receipt" items={operationalSessions.filter((item) => item.type === "Factory Dispatch" && item.finalized).slice(0, 4).map((item) => `${item.id}: ${item.scanned.length} cartons dispatched`)} />
+                  <AlertPanel title="Duplicate barcodes" items={findDuplicates(operationalCartons.map((carton) => carton.barcode)).map((barcode) => barcode)} />
                 </div>
-                <div className="mt-4 grid gap-3 md:grid-cols-2">
-                  <AlertPanel title="Low stock alerts" items={operationalProducts.map((product) => `${product.sku}: ${visibleCartons.filter((carton) => carton.productId === product.id && !lockedStatuses.includes(carton.status)).length} cartons`)} />
-                  <AlertPanel title="Near-expiry alerts" items={visibleCartons.filter((carton) => daysFrom(carton.expiry) <= 45).slice(0, 6).map((carton) => `${carton.sku} ${carton.cartonNo}: ${daysFrom(carton.expiry)} days`)} />
-                  <AlertPanel title="Pending receipt reminders" items={operationalSessions.filter((item) => item.type === "Factory Dispatch" && item.finalized).slice(0, 4).map((item) => `${item.id}: ${item.scanned.length} cartons dispatched`)} />
-                  <AlertPanel title="Duplicate barcode dashboard" items={findDuplicates(operationalCartons.map((carton) => carton.barcode)).map((barcode) => barcode)} />
-                </div>
-              </section>
-              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-                <h2 className="text-lg font-bold">Recent scans and actions</h2>
-                <div className="mt-4 space-y-3">
+              </Card>
+              <Card title="Recent activity">
+                <div className="ds-feed">
                   {state.audit.slice(0, 8).map((item) => (
-                    <div key={item.id} className="rounded-lg border border-slate-200 p-3">
-                      <div className="text-sm font-bold">{item.action}</div>
-                      <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.barcode ?? item.documentRef ?? item.newValue}</div>
-                      <div className="mt-1 text-xs text-slate-500">{new Date(item.time).toLocaleString()}</div>
+                    <div key={item.id} className="ds-feed__item">
+                      <div className="ds-feed__title">{item.action}</div>
+                      <div className="ds-feed__meta">{item.barcode ?? item.documentRef ?? item.newValue ?? "System"} / {state.users.find((entry) => entry.id === item.userId)?.name ?? item.role}</div>
+                      <div className="mt-1 text-[11px] text-[var(--text-faint)]">{new Date(item.time).toLocaleString()}</div>
                     </div>
                   ))}
+                  {!state.audit.length ? <EmptyState text="No audit activity yet." compact /> : null}
                 </div>
-              </section>
+              </Card>
             </div>
+
+            <div className="ds-two-col">
+              <Card title="Location Analytics">
+                <WarehouseBars warehouses={state.warehouses.map((warehouse) => ({ label: warehouse.name, count: visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length }))} total={Math.max(visibleCartons.length, 1)} />
+              </Card>
+              <Card title="Operating Status">
+                <div className="movement-chart">
+                  <ChartBar label="Factory" value={visibleCartons.filter((carton) => carton.status === "IN_FACTORY").length} total={Math.max(visibleCartons.length, 1)} tone="teal" />
+                  <ChartBar label="Transit" value={metrics.inTransit} total={Math.max(visibleCartons.length, 1)} tone="blue" />
+                  <ChartBar label="Customer" value={visibleCartons.filter((carton) => carton.status === "DISPATCHED_TO_CUSTOMER").length} total={Math.max(visibleCartons.length, 1)} tone="slate" />
+                  <ChartBar label="Exceptions" value={metrics.blocked + metrics.missing} total={Math.max(visibleCartons.length, 1)} tone="red" />
+                </div>
+              </Card>
+            </div>
+
+            <Card title="Inventory" action={<Tag mono>{visibleCartons.length} cartons shown</Tag>} pad={false}>
+              <InventoryTable rows={visibleCartons.slice(0, 80)} warehouseById={warehouseById} />
+            </Card>
           </section>
         ) : null}
 
-        {view === "Scanning" ? (
-          <section className="grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
-            <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-              <h2 className="text-lg font-bold">Scan workflow</h2>
-              <div className="mt-4 grid gap-2">
-                {(["Factory Dispatch", "Warehouse Receive", "Transfer Out", "Transfer In", "Customer Dispatch"] as ScanSession["type"][]).map((type) => (
-                  <Button key={type} variant={session?.type === type ? "primary" : "secondary"} onClick={() => startSession(type)} disabled={!can(user, "scan")}>
-                    {type.includes("Dispatch") ? <Truck size={18} /> : <ArrowRightLeft size={18} />} {type}
-                  </Button>
+        {view === "Dispatches" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Factory dispatches" value={dispatchDocuments.filter((doc) => doc.type.includes("Factory")).length} tone="brand" />
+              <Stat label="Customer dispatches" value={customerDispatches.length} tone="accent" />
+              <Stat label="In transit cartons" value={metrics.inTransit} tone="warning" />
+              <Stat label="Dispatch documents" value={dispatchDocuments.length} />
+            </div>
+            <Card title="Dispatch Workbench" action={<Button onClick={() => startSession("Factory Dispatch")}><Truck size={18} /> Start dispatch</Button>}>
+              <div className="ds-doc-grid">
+                {dispatchDocuments.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
+                {!dispatchDocuments.length ? <EmptyState text="No dispatch documents yet." /> : null}
+              </div>
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Inventory" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Available cartons" value={visibleCartons.filter((carton) => ["IN_FACTORY", "RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(carton.status)).length} tone="accent" />
+              <Stat label="In transit" value={metrics.inTransit} tone="brand" />
+              <Stat label="Damaged / lost" value={visibleCartons.filter((carton) => ["DAMAGED", "LOST"].includes(carton.status)).length} tone="danger" />
+              <Stat label="Near expiry" value={metrics.nearExpiry} tone="warning" />
+            </div>
+            <Card title="All Inventory" action={<Button variant="secondary" onClick={() => exportCsv("inventory-snapshot", visibleCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, batch: carton.batch, warehouse: warehouseById[carton.warehouseId], status: carton.status, expiry: carton.expiry })))}><Download size={18} /> Export</Button>} pad={false}>
+              <InventoryTable rows={visibleCartons} warehouseById={warehouseById} />
+            </Card>
+            <Card title="Damage / Write-off Queue">
+              <div className="grid gap-2 md:grid-cols-2">
+                {visibleCartons.filter((carton) => lockedStatuses.includes(carton.status)).slice(0, 12).map((carton) => (
+                  <CartonRow key={carton.id} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} canReverse={hasPermission(state, user, "Inventory", "approve")} onReverse={reverseCarton} />
                 ))}
+                {!visibleCartons.some((carton) => lockedStatuses.includes(carton.status)) ? <EmptyState text="No damaged, lost, blocked, expired, or reversed cartons." /> : null}
+              </div>
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Receiving" ? (
+          <section className="ds-screen">
+            <div className="os-action-grid">
+              <button className="os-action-card os-action-card--green" onClick={() => startSession("Warehouse Receive")}><PackageCheck size={26} /> Warehouse Receive</button>
+              <button className="os-action-card os-action-card--blue" onClick={() => startSession("Transfer In")}><ArrowRightLeft size={26} /> Transfer In</button>
+            </div>
+            <Card title="Receiving Documents">
+              <div className="ds-doc-grid">
+                {receivingDocuments.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
+                {!receivingDocuments.length ? <EmptyState text="No receiving slips yet." /> : null}
+              </div>
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Shipments" ? (
+          <section className="ds-screen">
+            <div className="os-action-grid">
+              <button className="os-action-card os-action-card--purple" onClick={() => startSession("Customer Dispatch")}><Send size={26} /> Customer Dispatch</button>
+              <button className="os-action-card os-action-card--blue" onClick={() => setView("Documents")}><FileText size={26} /> Shipment Slips</button>
+            </div>
+            <Card title="Customer Shipments">
+              <div className="ds-doc-grid">
+                {customerDispatches.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
+                {!customerDispatches.length ? <EmptyState text="No customer shipment documents yet." /> : null}
+              </div>
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Scan" ? (
+          <section className="ds-scan-grid">
+            <Card brand>
+              <h2 className="mm-card__title">Scan workflow</h2>
+              <div className="os-scan-buttons mt-4">
+                <button className="os-action-card os-action-card--orange" onClick={() => startSession("Factory Dispatch")} disabled={!can(user, "scan")}><Truck size={28} /> Factory Dispatch</button>
+                <button className="os-action-card os-action-card--green" onClick={() => startSession("Warehouse Receive")} disabled={!can(user, "scan")}><PackageCheck size={28} /> Warehouse Receive</button>
+                <button className="os-action-card os-action-card--blue" onClick={() => startSession("Transfer Out")} disabled={!can(user, "scan")}><ArrowRightLeft size={28} /> Transfer</button>
+                <button className="os-action-card os-action-card--purple" onClick={() => startSession("Customer Dispatch")} disabled={!can(user, "scan")}><Send size={28} /> Customer Dispatch</button>
               </div>
               <div className="mt-5">
-                <h3 className="text-sm font-bold uppercase text-slate-500">Saved drafts</h3>
+                <h3 className="text-[11px] font-extrabold uppercase tracking-[0.05em] text-blue-200">Saved drafts</h3>
                 <div className="mt-2 space-y-2">
                   {operationalSessions.filter((item) => !item.finalized).length ? operationalSessions.filter((item) => !item.finalized).map((item) => (
-                    <button key={item.id} onClick={() => resumeDraft(item.id)} className="w-full rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50">
+                    <button key={item.id} onClick={() => resumeDraft(item.id)} className="w-full rounded-[10px] border border-white/10 bg-white/10 p-3 text-left text-blue-50 hover:bg-white/15">
                       <div className="font-bold">{item.type}</div>
-                      <div className="text-xs text-slate-500">{item.scanned.length} scans / {new Date(item.updatedAt).toLocaleString()}</div>
+                      <div className="text-xs text-blue-100">{item.scanned.length} scans / {new Date(item.updatedAt).toLocaleString()}</div>
                     </button>
                   )) : <EmptyState text="No saved scan drafts." />}
                 </div>
               </div>
-            </div>
+            </Card>
 
-            <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <Card>
               {session ? (
                 <>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="ds-scanner-viewport" />
+                  <div className="ds-scan-panel__head">
                     <div>
-                      <h2 className="text-lg font-bold">{session.type}</h2>
-                      <p className="text-sm text-slate-500">{warehouseById[session.sourceWarehouseId]} -&gt; {session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : session.customer ?? "Customer"}</p>
+                      <h2 className="m-0 text-lg font-extrabold text-[var(--text-strong)]">{session.type}</h2>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">{warehouseById[session.sourceWarehouseId]} -&gt; {session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : session.customer ?? "Customer"}</p>
                     </div>
-                    <div className="text-right">
-                      <div className="text-xs font-bold uppercase text-slate-500">Scanned</div>
-                      <div className="text-3xl font-bold text-emerald-700">{session.scanned.length}</div>
-                      {session.expected?.length ? <div className="text-xs font-semibold text-slate-500">Expected {session.expected.length}</div> : null}
-                    </div>
+                    <StatusBadge tone="blue">{session.scanned.length} scanned</StatusBadge>
                   </div>
                   {session.type === "Warehouse Receive" || session.type === "Transfer In" ? (
                     <div className="mt-4">
@@ -1527,10 +1887,15 @@ export default function Home() {
                       handleScan(scanInput);
                     }}
                   >
-                    <label className="grid gap-2 text-sm font-bold text-slate-700">
-                      USB/Bluetooth scanner input
-                      <input ref={scanRef} value={scanInput} onChange={(event) => setScanInput(event.target.value)} className="h-16 rounded-xl border-2 border-emerald-700 px-4 font-mono text-lg outline-none" placeholder="Scan barcode and press Enter" />
-                    </label>
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <label className="mm-field">
+                          <span className="mm-field__label">USB/Bluetooth scanner input</span>
+                          <input ref={scanRef} value={scanInput} onChange={(event) => setScanInput(event.target.value)} className="mm-input mm-input--mono h-[52px] border-2 border-[var(--blue-500)] px-4 text-base" placeholder="Scan barcode and press Enter" />
+                        </label>
+                      </div>
+                      <Button variant="accent" className="self-end" onClick={() => handleScan(scanInput)}><QrCode size={18} /> Add</Button>
+                    </div>
                   </form>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Button variant="secondary" onClick={() => setCameraOn((value) => !value)}><Camera size={18} /> Camera</Button>
@@ -1538,9 +1903,9 @@ export default function Home() {
                     <Button variant="secondary" onClick={saveDraft}>Save draft</Button>
                     <Button onClick={finalizeSession} disabled={session.scanned.length === 0}><CheckCircle2 size={18} /> Finalize</Button>
                   </div>
-                  {scanMessage ? <div className={`mt-4 rounded-lg p-3 text-sm font-bold ${scanMessage.type === "ok" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{scanMessage.text}</div> : null}
+                  {scanMessage ? <div className={`mt-4 rounded-xl p-3 text-sm font-bold ${scanMessage.type === "ok" ? "bg-[var(--teal-50)] text-[var(--teal-700)]" : "bg-[var(--danger-50)] text-[var(--danger-700)]"}`}>{scanMessage.text}</div> : null}
                   {cameraOn ? <CameraScanner onScan={handleScan} /> : null}
-                  <div className="mt-5 max-h-[360px] space-y-2 overflow-auto">
+                  <div className="ds-scan-list">
                     {session.scanned.map((barcode) => {
                       const carton = operationalCartons.find((item) => item.barcode === barcode);
                       return carton ? <CartonRow key={barcode} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} /> : null;
@@ -1550,7 +1915,7 @@ export default function Home() {
               ) : (
                 <EmptyState text="Start a scan workflow to begin. Inventory movement is locked until finalization." />
               )}
-            </div>
+            </Card>
           </section>
         ) : null}
 
@@ -1558,9 +1923,110 @@ export default function Home() {
           <ProductsPanel products={operationalProducts} cartons={operationalCartons} patterns={state.barcodePatterns} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
         ) : null}
 
-        {view === "Import" ? (
+        {view === "Factory Management" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Factory stock" value={factoryCartons.length} tone="accent" />
+              <Stat label="Production batches" value={new Set(factoryCartons.map((carton) => carton.batch)).size} tone="warning" />
+              <Stat label="Ready to dispatch" value={factoryCartons.filter((carton) => carton.status === "IN_FACTORY").length} tone="brand" />
+              <Stat label="Batch slips" value={operationalDocuments.filter((doc) => doc.type.includes("Production Batch")).length} />
+            </div>
+            <div className="os-action-grid">
+              <button className="os-action-card os-action-card--orange" onClick={() => startSession("Factory Dispatch")}><Truck size={26} /> Dispatch to Warehouse</button>
+              <button className="os-action-card os-action-card--blue" onClick={() => setView("Products")}><Archive size={26} /> Production Batches</button>
+              <button className="os-action-card os-action-card--green" onClick={() => setView("Documents")}><FileText size={26} /> Batch Slips</button>
+            </div>
+            <Card title="Active Factory Cartons" pad={false}>
+              <InventoryTable rows={factoryCartons} warehouseById={warehouseById} />
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Warehouse Management" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Warehouse stock" value={warehouseCartons.length} tone="accent" />
+              <Stat label="Receiving slips" value={receivingDocuments.length} tone="accent" />
+              <Stat label="Transfers" value={operationalDocuments.filter((doc) => doc.type.includes("Transfer")).length} tone="brand" />
+              <Stat label="Customer dispatches" value={customerDispatches.length} tone="warning" />
+            </div>
+            <div className="os-action-grid">
+              <button className="os-action-card os-action-card--green" onClick={() => startSession("Warehouse Receive")}><PackageCheck size={26} /> Receiving</button>
+              <button className="os-action-card os-action-card--blue" onClick={() => startSession("Transfer Out")}><ArrowRightLeft size={26} /> Transfer Out</button>
+              <button className="os-action-card os-action-card--purple" onClick={() => startSession("Customer Dispatch")}><Send size={26} /> Customer Dispatch</button>
+            </div>
+            <Card title="Location-wise Cartons">
+              <WarehouseBars warehouses={state.warehouses.filter((warehouse) => warehouse.type === "warehouse").map((warehouse) => ({ label: warehouse.name, count: visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length }))} total={Math.max(warehouseCartons.length, 1)} />
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Customers" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Customers served" value={new Set(operationalCartons.map((carton) => carton.customer).filter(Boolean)).size} tone="accent" />
+              <Stat label="Customer shipments" value={customerDispatches.length} tone="brand" />
+              <Stat label="Dispatched cartons" value={visibleCartons.filter((carton) => carton.status === "DISPATCHED_TO_CUSTOMER").length} tone="warning" />
+              <Stat label="Delivered cartons" value={visibleCartons.filter((carton) => carton.status === "DELIVERED").length} />
+            </div>
+            <Card title="Customer Dispatch Records">
+              <div className="ds-doc-grid">
+                {customerDispatches.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
+                {!customerDispatches.length ? <EmptyState text="No customer dispatch records yet." /> : null}
+              </div>
+            </Card>
+            <MasterDataCenter title="Customer Master" masterKey="customers" records={state.managementConfig.masters.customers} canManage={hasPermission(state, user, "Customers", "create")} onAdd={addMasterRecord} onStatus={setMasterStatus} />
+          </section>
+        ) : null}
+
+        {view === "Users" ? (
+          <Card title="Users and Roles" pad={false}>
+            <div className="ds-table-wrap">
+              <table className="ds-table">
+                <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Warehouse</th></tr></thead>
+                <tbody>
+                  {state.users.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.name}</td>
+                      <td className="ds-mono">{item.email}</td>
+                      <td><Tag tone="brand">{item.role}</Tag></td>
+                      <td>{warehouseById[item.warehouseId]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        ) : null}
+
+        {view === "Locations" ? (
+          <section className="ds-screen">
+            <Card title="Location Analytics">
+              <WarehouseBars warehouses={state.warehouses.map((warehouse) => ({ label: warehouse.name, count: visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length }))} total={Math.max(visibleCartons.length, 1)} />
+            </Card>
+            <Card title="Location Details" pad={false}>
+              <div className="ds-table-wrap">
+                <table className="ds-table">
+                  <thead><tr><th>Location</th><th>Type</th><th>Cartons</th><th>Users</th></tr></thead>
+                  <tbody>
+                    {state.warehouses.map((warehouse) => (
+                      <tr key={warehouse.id}>
+                        <td>{warehouse.name}</td>
+                        <td><Tag>{warehouse.type}</Tag></td>
+                        <td className="ds-mono">{visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length}</td>
+                        <td className="ds-mono">{state.users.filter((item) => item.warehouseId === warehouse.id).length}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          </section>
+        ) : null}
+
+        {view === "Import Data" ? (
           <section className="grid gap-5">
-            <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+            <Card>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-lg font-bold">Excel Import Wizard</h2>
@@ -1570,11 +2036,11 @@ export default function Home() {
               </div>
               <div className="mt-4 grid gap-2 md:grid-cols-5">
                 {(["Upload", "Preview", "Validate", "Import", "Summary"] as const).map((step) => (
-                  <div key={step} className={`rounded-lg border p-3 text-center text-sm font-bold ${step === importStep ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-500"}`}>{step}</div>
+                  <div key={step} className={`rounded-xl border p-3 text-center text-sm font-bold ${step === importStep ? "border-[var(--blue-100)] bg-[var(--blue-50)] text-[var(--blue-700)]" : "border-[var(--border-subtle)] bg-white text-[var(--text-muted)]"}`}>{step}</div>
                 ))}
               </div>
               <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
-                <input className="w-full rounded-lg border border-slate-300 p-3" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && previewExcel(event.target.files[0])} />
+                <input className="mm-input w-full p-1.5" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && previewExcel(event.target.files[0])} />
                 <Button disabled={!importPreview.length || importErrors.length > 0} onClick={() => setImportStep("Import")}>Validate</Button>
                 <Button disabled={!importPreview.length || importErrors.length > 0} onClick={importSkuMaster}><Upload size={18} /> Import</Button>
               </div>
@@ -1584,16 +2050,16 @@ export default function Home() {
                 <Stat label="Duplicates update" value={importPreview.filter((item) => item.status === "duplicate").length} tone="amber" />
                 <Stat label="Errors" value={importPreview.filter((item) => item.status === "error").length} tone={importErrors.length ? "rose" : "slate"} />
               </div>
-              {importSummary ? <div className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{importSummary}</div> : null}
-            </div>
+              {importSummary ? <div className="mt-4 rounded-xl bg-[var(--teal-50)] p-3 text-sm font-bold text-[var(--teal-700)]">{importSummary}</div> : null}
+            </Card>
             <div className="grid gap-5 xl:grid-cols-[1.4fr_0.6fr]">
-              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              <Card>
                 <h2 className="text-lg font-bold">Preview and validation</h2>
                 <div className="mt-4 overflow-auto">
                   <table className="w-full min-w-[960px] border-collapse text-left text-sm">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50">
-                        {["Row", "Status", "SKU", "Pattern", "Range", "Actual cartons", "Message"].map((header) => <th key={header} className="p-3 font-bold text-slate-600">{header}</th>)}
+                        {["Row", "Status", "SKU", "Pattern", "Range", "Actual cartons", "Message"].map((header) => <th key={header} className="p-3 text-xs font-extrabold uppercase tracking-[0.04em] text-[var(--text-muted)]">{header}</th>)}
                       </tr>
                     </thead>
                     <tbody>
@@ -1612,8 +2078,8 @@ export default function Home() {
                   </table>
                   {!importPreview.length ? <EmptyState text="Upload an Excel or CSV file to preview SKU templates." /> : null}
                 </div>
-              </section>
-              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              </Card>
+              <Card>
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-lg font-bold">Error report</h2>
                   <Button variant="secondary" onClick={() => exportCsv("sku-master-import-errors", importErrors.map((error) => ({ error })))}>
@@ -1623,13 +2089,13 @@ export default function Home() {
                 <div className="mt-3 space-y-2">
                   {importErrors.length ? importErrors.map((error) => <div key={error} className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-800">{error}</div>) : <EmptyState text="No blocking validation errors." />}
                 </div>
-              </section>
+              </Card>
             </div>
           </section>
         ) : null}
 
         {view === "Documents" ? (
-          <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <Card>
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-bold">Documents and slips</h2>
               <Button variant="secondary" onClick={() => exportCsv("documents", state.documents.map((doc) => ({ id: doc.id, type: doc.type, createdAt: doc.createdAt, cartons: doc.barcodes.length, discrepancy: doc.discrepancy })))}>
@@ -1641,7 +2107,7 @@ export default function Home() {
                 <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />
               ))}
             </div>
-          </section>
+          </Card>
         ) : null}
 
         {view === "Reports" ? (
@@ -1651,30 +2117,30 @@ export default function Home() {
             </div>
             <div className="grid gap-5 lg:grid-cols-2">
               <ReportTable title="Inventory by SKU, batch, expiry, status" rows={visibleCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, batch: carton.batch, expiry: carton.expiry, warehouse: warehouseById[carton.warehouseId], status: carton.status }))} />
-              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+              <Card>
                 <h2 className="text-lg font-bold">Shortage and investigation cases</h2>
                 <div className="mt-4 space-y-3">
                   {operationalMismatches.map((item) => (
                     <div key={item.id} className="rounded-lg border border-slate-200 p-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="font-bold">{item.id}</div>
-                        <span className="rounded-md bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800">{item.status}</span>
+                        <StatusBadge tone="amber">{item.status}</StatusBadge>
                       </div>
                       <div className="mt-2 text-sm text-slate-600">Missing {item.missing.length} / Extra {item.extra.length} / Duplicate {item.duplicates.length}</div>
                       {can(user, "sensitive") && item.status === "Open" ? <MismatchApproval onApprove={(reason) => approveMismatch(item.id, reason)} /> : null}
                     </div>
                   ))}
                 </div>
-              </section>
+              </Card>
             </div>
           </section>
         ) : null}
 
-        {view === "Audit" ? (
+        {view === "Audit Logs" ? (
           <ReportTable title="User activity and audit logs" rows={state.audit.map((item) => ({ time: item.time, user: state.users.find((entry) => entry.id === item.userId)?.name, role: item.role, action: item.action, barcode: item.barcode, document: item.documentRef, old: item.oldValue, new: item.newValue, reason: item.reason }))} />
         ) : null}
 
-        {view === "Demo Data" ? (
+        {view === "Demo / Production Mode" ? (
           <DemoDataManager
             mode={state.settings.mode}
             goLiveAt={state.settings.goLiveAt}
@@ -1705,17 +2171,345 @@ export default function Home() {
             hasAuditLogs={state.audit.length > 0}
           />
         ) : null}
-      </div>
+
+        {view === "Settings" ? (
+          <section className="ds-screen">
+            <div className="os-kpi-grid">
+              <Stat label="Supabase" value={supabaseStatus} tone={supabaseStatus === "connected" ? "accent" : "danger"} />
+              <Stat label="Mode" value={state.settings.mode} tone={state.settings.mode === "production" ? "brand" : "warning"} />
+              <Stat label="Warehouses" value={state.warehouses.length} />
+              <Stat label="Audit logs" value={state.audit.length} />
+            </div>
+            <Card title="System Settings">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-xl bg-[var(--slate-50)] p-4">
+                  <div className="text-xs font-extrabold uppercase tracking-[0.06em] text-[var(--text-muted)]">Project reference</div>
+                  <div className="mt-2 font-mono text-sm font-bold text-[var(--text-strong)]">{state.settings.supabaseProjectRef ?? "Not configured"}</div>
+                </div>
+                <div className="rounded-xl bg-[var(--slate-50)] p-4">
+                  <div className="text-xs font-extrabold uppercase tracking-[0.06em] text-[var(--text-muted)]">Cutover status</div>
+                  <div className="mt-2 text-sm font-bold text-[var(--text-strong)]">{state.settings.goLiveAt ? `Go Live completed ${new Date(state.settings.goLiveAt).toLocaleString()}` : "UAT mode active"}</div>
+                </div>
+              </div>
+            </Card>
+            <SystemSettingsPanel settings={state.managementConfig.settings} warehouses={state.warehouses} onSave={updateManagementSettings} />
+            <PermissionMatrix permissions={state.managementConfig.permissions} onToggle={togglePermission} />
+            <MasterDataSuite config={state.managementConfig} canManage={user.role === "Admin"} onAdd={addMasterRecord} onStatus={setMasterStatus} />
+            <AdminSafetyPanel products={state.products} warehouses={state.warehouses} cartons={state.cartons} documents={state.documents} users={state.users} />
+          </section>
+        ) : null}
+      </section>
+      </section>
     </main>
+  );
+}
+
+function RoleWorkspace({
+  user,
+  metrics,
+  pendingApprovals,
+  draftSessions,
+  setView,
+}: {
+  user: User;
+  metrics: { cartons: number; units: number; inTransit: number; blocked: number; nearExpiry: number; missing: number };
+  pendingApprovals: number;
+  draftSessions: number;
+  setView: (view: string) => void;
+}) {
+  const roleActions: Record<Role, { label: string; view: string; tone: string }[]> = {
+    Admin: [
+      { label: "User & Permissions", view: "Settings", tone: "os-action-card--blue" },
+      { label: "Master Data", view: "Settings", tone: "os-action-card--green" },
+      { label: "Import / Export", view: "Import Data", tone: "os-action-card--orange" },
+    ],
+    Accountant: [
+      { label: "Approval Queue", view: "Reports", tone: "os-action-card--orange" },
+      { label: "Financial Dispatch", view: "Reports", tone: "os-action-card--blue" },
+      { label: "Audit Logs", view: "Audit Logs", tone: "os-action-card--green" },
+    ],
+    "Warehouse Manager": [
+      { label: "Inventory Overview", view: "Inventory", tone: "os-action-card--green" },
+      { label: "Dispatch / Receive", view: "Scan", tone: "os-action-card--orange" },
+      { label: "Expiry & Damage", view: "Reports", tone: "os-action-card--purple" },
+    ],
+    Operator: [
+      { label: "Start Scanning", view: "Scan", tone: "os-action-card--orange" },
+      { label: "Resume Drafts", view: "Scan", tone: "os-action-card--blue" },
+      { label: "Find Inventory", view: "Inventory", tone: "os-action-card--green" },
+    ],
+    Viewer: [
+      { label: "Inventory Visibility", view: "Inventory", tone: "os-action-card--green" },
+      { label: "Dispatch History", view: "Dispatches", tone: "os-action-card--blue" },
+      { label: "KPI Reports", view: "Reports", tone: "os-action-card--purple" },
+    ],
+  };
+  return (
+    <Card title={`${user.role} Workspace`}>
+      <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+        <div className="os-action-grid">
+          {roleActions[user.role].map((item) => (
+            <button key={item.label} className={`os-action-card ${item.tone}`} onClick={() => setView(item.view)}>
+              <ArrowRightLeft size={24} /> {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Stat label="Pending approvals" value={pendingApprovals} tone={pendingApprovals ? "warning" : "accent"} />
+          <Stat label="Draft sessions" value={draftSessions} tone={draftSessions ? "brand" : "slate"} />
+          <Stat label="Exceptions" value={metrics.blocked + metrics.missing} tone={metrics.blocked + metrics.missing ? "danger" : "accent"} />
+          <Stat label="Near expiry" value={metrics.nearExpiry} tone={metrics.nearExpiry ? "warning" : "slate"} />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function MasterDataCenter({
+  title,
+  masterKey,
+  records,
+  canManage,
+  onAdd,
+  onStatus,
+}: {
+  title: string;
+  masterKey: MasterKey;
+  records: MasterRecord[];
+  canManage: boolean;
+  onAdd: (masterKey: MasterKey, form: FormData) => void;
+  onStatus: (masterKey: MasterKey, id: string, status: MasterStatus) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const filtered = records.filter((item) => [item.name, item.code, item.description].join(" ").toLowerCase().includes(query.toLowerCase()));
+  return (
+    <Card title={title}>
+      <div className="mb-4 grid gap-3 lg:grid-cols-[1fr_2fr]">
+        <TextField label="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
+        {canManage ? (
+          <form
+            className="grid gap-2 md:grid-cols-[1fr_0.8fr_1.4fr_auto]"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onAdd(masterKey, new FormData(event.currentTarget));
+              event.currentTarget.reset();
+            }}
+          >
+            <TextField name="name" label="Name" required />
+            <TextField name="code" label="Code" required />
+            <TextField name="description" label="Description" />
+            <Button type="submit" className="self-end">Create</Button>
+          </form>
+        ) : null}
+      </div>
+      <div className="ds-table-wrap">
+        <table className="ds-table">
+          <thead><tr><th>Name</th><th>Code</th><th>Status</th><th>Description</th><th>Updated</th><th>Actions</th></tr></thead>
+          <tbody>
+            {filtered.map((record) => (
+              <tr key={record.id}>
+                <td>{record.name}</td>
+                <td className="ds-mono">{record.code}</td>
+                <td><StatusBadge tone={record.status === "Active" ? "teal" : record.status === "Inactive" ? "amber" : "slate"}>{record.status}</StatusBadge></td>
+                <td>{record.description}</td>
+                <td className="ds-mono">{new Date(record.updatedAt).toLocaleDateString()}</td>
+                <td>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" disabled={!canManage || record.status === "Active"} onClick={() => onStatus(masterKey, record.id, "Active")}>Activate</Button>
+                    <Button size="sm" variant="secondary" disabled={!canManage || record.status === "Inactive"} onClick={() => onStatus(masterKey, record.id, "Inactive")}>Deactivate</Button>
+                    <Button size="sm" variant="danger" disabled={!canManage || record.status === "Archived"} onClick={() => onStatus(masterKey, record.id, "Archived")}>Archive</Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!filtered.length ? <EmptyState text="No records match this search." /> : null}
+      </div>
+    </Card>
+  );
+}
+
+function MasterDataSuite({ config, canManage, onAdd, onStatus }: { config: ManagementConfig; canManage: boolean; onAdd: (masterKey: MasterKey, form: FormData) => void; onStatus: (masterKey: MasterKey, id: string, status: MasterStatus) => void }) {
+  const masters: { key: MasterKey; title: string }[] = [
+    { key: "roles", title: "Roles" },
+    { key: "transporters", title: "Transporters" },
+    { key: "vehicles", title: "Vehicles" },
+    { key: "drivers", title: "Drivers" },
+    { key: "approvalReasons", title: "Approval Reasons" },
+    { key: "adjustmentReasons", title: "Adjustment Reasons" },
+    { key: "damageReasons", title: "Damage Reasons" },
+    { key: "numberingSeries", title: "Numbering / Document Series" },
+  ];
+  return (
+    <section className="grid gap-5">
+      {masters.map((item) => (
+        <MasterDataCenter key={item.key} title={item.title} masterKey={item.key} records={config.masters[item.key]} canManage={canManage} onAdd={onAdd} onStatus={onStatus} />
+      ))}
+    </section>
+  );
+}
+
+function PermissionMatrix({ permissions, onToggle }: { permissions: PermissionGrant[]; onToggle: (role: Role, module: string, action: PermissionAction) => void }) {
+  const roles: Role[] = ["Admin", "Accountant", "Warehouse Manager", "Operator", "Viewer"];
+  return (
+    <Card title="Role & Permission Management" pad={false}>
+      <div className="ds-table-wrap">
+        <table className="ds-table min-w-[1120px]">
+          <thead><tr><th>Role</th><th>Module</th>{permissionActions.map((action) => <th key={action}>{action}</th>)}</tr></thead>
+          <tbody>
+            {roles.flatMap((role) => permissionModules.map((module) => {
+              const grant = permissions.find((item) => item.role === role && item.module === module);
+              return (
+                <tr key={`${role}-${module}`}>
+                  <td><Tag tone="brand">{role}</Tag></td>
+                  <td>{module}</td>
+                  {permissionActions.map((action) => (
+                    <td key={action}>
+                      <input type="checkbox" checked={grant?.actions.includes(action) ?? false} onChange={() => onToggle(role, module, action)} disabled={role === "Admin" && action === "view"} />
+                    </td>
+                  ))}
+                </tr>
+              );
+            }))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function SystemSettingsPanel({ settings, warehouses, onSave }: { settings: ManagementSettings; warehouses: WarehouseRecord[]; onSave: (form: FormData) => void }) {
+  return (
+    <Card title="Configurable System Settings">
+      <form
+        className="grid gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(new FormData(event.currentTarget));
+        }}
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          <SelectField name="defaultFactory" label="Default factory" defaultValue={settings.defaultFactory}>{warehouses.filter((item) => item.type === "factory").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</SelectField>
+          <SelectField name="defaultWarehouse" label="Default warehouse" defaultValue={settings.defaultWarehouse}>{warehouses.filter((item) => item.type === "warehouse").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</SelectField>
+          <SelectField name="stockRule" label="Stock issue rule" defaultValue={settings.stockRule}><option value="FEFO">FEFO</option><option value="FIFO">FIFO</option></SelectField>
+          <TextField name="nearExpiryWarningDays" label="Near-expiry warning days" type="number" defaultValue={settings.nearExpiryWarningDays} />
+          <TextField name="cartonNumberLength" label="Carton number length" type="number" defaultValue={settings.cartonNumberLength} />
+          <TextField name="dispatchPrefix" label="Dispatch prefix" defaultValue={settings.documentPrefixes.dispatch} />
+          <TextField name="receivingPrefix" label="Receiving prefix" defaultValue={settings.documentPrefixes.receiving} />
+          <TextField name="transferPrefix" label="Transfer prefix" defaultValue={settings.documentPrefixes.transfer} />
+          <TextField name="batchPrefix" label="Batch prefix" defaultValue={settings.documentPrefixes.batch} />
+        </div>
+        <TextField name="barcodeFormatDefault" label="Barcode format default" defaultValue={settings.barcodeFormatDefault} mono />
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+          {[
+            ["autoFocusScanner", "Auto-focus scanner", settings.autoFocusScanner],
+            ["scannerSounds", "Scanner sounds", settings.scannerSounds],
+            ["autoRegisterCartonOnFirstScan", "Auto-register carton on first scan", settings.autoRegisterCartonOnFirstScan],
+            ["twoLevelApprovals", "Two-level approval rules", settings.twoLevelApprovals],
+          ].map(([name, label, checked]) => (
+            <label key={String(name)} className="flex items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--slate-50)] p-3 text-sm font-bold">
+              <input type="checkbox" name={String(name)} defaultChecked={Boolean(checked)} /> {label}
+            </label>
+          ))}
+        </div>
+        <Button type="submit" className="w-fit"><Settings size={18} /> Save settings</Button>
+      </form>
+    </Card>
+  );
+}
+
+function AdminSafetyPanel({ products, warehouses, cartons, documents, users }: { products: Product[]; warehouses: WarehouseRecord[]; cartons: Carton[]; documents: DocumentRecord[]; users: User[] }) {
+  const checks = [
+    { label: "Last Admin protected", ok: users.filter((item) => item.role === "Admin").length > 1, detail: "Do not archive/delete the final Admin account." },
+    { label: "Warehouses with inventory protected", ok: warehouses.every((warehouse) => cartons.filter((carton) => carton.warehouseId === warehouse.id).length === 0) === false, detail: "Warehouses with cartons must be archived only after stock is moved." },
+    { label: "Products with carton history protected", ok: products.some((product) => cartons.some((carton) => carton.productId === product.id)), detail: "Products with transactions are archive-only." },
+    { label: "Customers with dispatch history protected", ok: documents.some((doc) => doc.type.includes("Customer")), detail: "Customers with dispatch history should not be hard-deleted." },
+  ];
+  return (
+    <Card title="Admin Safety Guardrails">
+      <div className="grid gap-3 md:grid-cols-2">
+        {checks.map((check) => (
+          <div key={check.label} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--slate-50)] p-4">
+            <div className="flex items-center gap-2 font-bold text-[var(--text-strong)]"><ShieldCheck size={18} className="text-[var(--blue-600)]" /> {check.label}</div>
+            <p className="mt-2 text-sm text-[var(--text-muted)]">{check.detail}</p>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function WarehouseBars({ warehouses, total }: { warehouses: { label: string; count: number }[]; total: number }) {
+  return (
+    <div className="warehouse-bars">
+      {warehouses.map((warehouse) => (
+        <div key={warehouse.label} className="warehouse-bar-row">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-bold text-[var(--text-strong)]">{warehouse.label}</span>
+            <span className="font-mono text-sm font-bold text-[var(--text-muted)]">{warehouse.count}</span>
+          </div>
+          <div className="warehouse-bar-track">
+            <span className="warehouse-bar-fill" style={{ width: `${Math.max(4, (warehouse.count / total) * 100)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InventoryTable({ rows, warehouseById }: { rows: Carton[]; warehouseById: Record<string, string> }) {
+  return (
+    <div className="ds-table-wrap">
+      <table className="ds-table">
+        <thead>
+          <tr>
+            <th>Barcode</th>
+            <th>SKU</th>
+            <th>Batch</th>
+            <th>Warehouse</th>
+            <th>Expiry</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((carton) => (
+            <tr key={carton.id}>
+              <td className="ds-mono text-[var(--text-strong)]">...{carton.barcode.slice(-12)}</td>
+              <td><Tag mono>{carton.sku}</Tag></td>
+              <td className="ds-mono">{carton.batch}</td>
+              <td>{warehouseById[carton.warehouseId]}</td>
+              <td className="ds-mono">{carton.expiry}</td>
+              <td><StatusBadge status={carton.status} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!rows.length ? <EmptyState text="No cartons match the current role and mode." /> : null}
+    </div>
+  );
+}
+
+function ChartBar({ label, value, total, tone }: { label: string; value: number; total: number; tone: "teal" | "blue" | "slate" | "red" }) {
+  return (
+    <div className="chart-bar">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-bold text-[var(--text-strong)]">{label}</span>
+        <span className="font-mono text-sm font-bold text-[var(--text-muted)]">{value}</span>
+      </div>
+      <div className="chart-bar-track">
+        <span className={`chart-bar-fill chart-bar-fill--${tone}`} style={{ width: `${Math.max(4, (value / total) * 100)}%` }} />
+      </div>
+    </div>
   );
 }
 
 function AlertPanel({ title, items }: { title: string; items: string[] }) {
   return (
-    <div className="rounded-lg border border-slate-200 p-3">
-      <div className="flex items-center gap-2 font-bold"><AlertTriangle size={18} className="text-amber-600" /> {title}</div>
-      <div className="mt-3 space-y-2">
-        {items.length ? items.map((item) => <div key={item} className="rounded-md bg-slate-50 p-2 text-sm text-slate-700">{item}</div>) : <EmptyState text="Nothing pending." compact />}
+    <div className="ds-alert-panel">
+      <div className="ds-alert-panel__title"><AlertTriangle size={16} className="text-[var(--warning-500)]" /> {title}</div>
+      <div className="ds-alert-panel__items">
+        {items.length ? items.map((item) => <div key={item} className="ds-alert-panel__item">{item}</div>) : <EmptyState text="Nothing pending." compact />}
       </div>
     </div>
   );
@@ -1750,22 +2544,20 @@ function DemoDataManager({
   const demoTotal = demoCounts.products + demoCounts.cartons + demoCounts.sessions + demoCounts.documents + demoCounts.mismatches;
   return (
     <section className="grid gap-5">
-      <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+      <Card>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-bold">System Mode</h2>
-            <p className="mt-1 text-sm text-slate-600">Development Mode keeps UAT demo workflows visible. Production Mode hides demo operational records and shows only real business data.</p>
+            <h2 className="mm-card__title">System Mode</h2>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">Development Mode keeps UAT demo workflows visible. Production Mode hides demo operational records and shows only real business data.</p>
           </div>
-          <span className={`rounded-lg px-3 py-2 text-sm font-bold ${mode === "development" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>
-            {mode === "development" ? "Development Mode" : "Production Mode"}
-          </span>
+          <StatusBadge tone={mode === "development" ? "amber" : "teal"}>{mode === "development" ? "Development Mode" : "Production Mode"}</StatusBadge>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button variant={mode === "development" ? "primary" : "secondary"} onClick={() => onSetMode("development")}>Development Mode</Button>
           <Button variant={mode === "production" ? "primary" : "secondary"} onClick={() => onSetMode("production")}>Production Mode</Button>
         </div>
-        {goLiveAt ? <div className="mt-3 rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">Go Live completed at {new Date(goLiveAt).toLocaleString()}</div> : null}
-      </div>
+        {goLiveAt ? <div className="mt-3 rounded-xl bg-[var(--teal-50)] p-3 text-sm font-semibold text-[var(--teal-700)]">Go Live completed at {new Date(goLiveAt).toLocaleString()}</div> : null}
+      </Card>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
         <Stat label="Demo products" value={demoCounts.products} />
@@ -1776,17 +2568,17 @@ function DemoDataManager({
         <Stat label="Archived demo" value={demoCounts.archived} tone={demoCounts.archived ? "amber" : "slate"} />
       </div>
 
-      <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-        <h2 className="text-lg font-bold">Production Cutover Tool</h2>
-        <p className="mt-1 text-sm text-slate-600">Go Live archives demo inventory, products, dispatches, reports, and mismatch cases, then switches to Production Mode. Users, warehouses, barcode templates, audit logs, and configuration are preserved.</p>
+      <Card>
+        <h2 className="mm-card__title">Production Cutover Tool</h2>
+        <p className="mt-1 text-sm text-[var(--text-muted)]">Go Live archives demo inventory, products, dispatches, reports, and mismatch cases, then switches to Production Mode. Users, warehouses, barcode templates, audit logs, and configuration are preserved.</p>
         <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto_auto_auto]">
-          <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reason for demo data action" className="min-h-11 rounded-lg border border-slate-300 px-3 text-sm" />
+          <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reason for demo data action" className="mm-input text-sm" />
           <Button variant="secondary" disabled={!reason.trim() || demoTotal === 0} onClick={() => onArchive(reason)}>Archive Demo Data</Button>
           <Button variant="secondary" disabled={!reason.trim() || demoTotal === 0} onClick={() => onRestore(reason)}>Restore Demo Data</Button>
           <Button disabled={!reason.trim()} onClick={() => onGoLive(reason)}><CheckCircle2 size={18} /> Go Live</Button>
           <Button variant="danger" disabled={!reason.trim() || demoTotal === 0} onClick={() => onDelete(reason)}>Delete Permanently</Button>
         </div>
-      </section>
+      </Card>
 
       <section className="grid gap-5 xl:grid-cols-3">
         <DemoList title="Demo Products" rows={demoProducts.map((item) => `${item.archived ? "[Archived] " : ""}${item.sku} / ${item.flavour} / ${item.caseQty}${item.qtyUnit}`)} />
@@ -1799,12 +2591,12 @@ function DemoDataManager({
 
 function DemoList({ title, rows }: { title: string; rows: string[] }) {
   return (
-    <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-      <h3 className="font-bold">{title}</h3>
+    <Card>
+      <h3 className="font-bold text-[var(--text-strong)]">{title}</h3>
       <div className="mt-3 max-h-[420px] space-y-2 overflow-auto">
-        {rows.length ? rows.map((row) => <div key={row} className="rounded-lg bg-slate-50 p-2 font-mono text-xs text-slate-700">{row}</div>) : <EmptyState text="No demo records." compact />}
+        {rows.length ? rows.map((row) => <div key={row} className="rounded-xl bg-[var(--slate-50)] p-2 font-mono text-xs text-[var(--text-body)]">{row}</div>) : <EmptyState text="No demo records." compact />}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -1847,26 +2639,26 @@ function PreLaunchChecklist({
     { label: "Production mode ready", ok: mode === "production" && hasRealProducts, detail: mode === "production" ? "Production Mode active" : "Still in Development Mode" },
   ];
   return (
-    <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+    <Card>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold">Pre-launch Checklist</h2>
-          <p className="mt-1 text-sm text-slate-600">Use this during UAT. A red item means the workflow still needs real-data testing before cutover.</p>
+          <h2 className="mm-card__title">Pre-launch Checklist</h2>
+          <p className="mt-1 text-sm text-[var(--text-muted)]">Use this during UAT. A red item means the workflow still needs real-data testing before cutover.</p>
         </div>
-        <span className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold text-slate-700">{checks.filter((item) => item.ok).length}/{checks.length} ready</span>
+        <Tag tone="brand">{checks.filter((item) => item.ok).length}/{checks.length} ready</Tag>
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         {checks.map((item) => (
-          <div key={item.label} className={`rounded-lg border p-3 ${item.ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+          <div key={item.label} className={`rounded-xl border p-3 ${item.ok ? "border-[var(--teal-100)] bg-[var(--teal-50)]" : "border-amber-200 bg-amber-50"}`}>
             <div className="flex items-center gap-2 font-bold">
-              {item.ok ? <CheckCircle2 size={18} className="text-emerald-700" /> : <AlertTriangle size={18} className="text-amber-700" />}
+              {item.ok ? <CheckCircle2 size={18} className="text-[var(--teal-700)]" /> : <AlertTriangle size={18} className="text-amber-700" />}
               {item.label}
             </div>
-            <div className="mt-1 text-sm text-slate-600">{item.detail}</div>
+            <div className="mt-1 text-sm text-[var(--text-muted)]">{item.detail}</div>
           </div>
         ))}
       </div>
-    </section>
+    </Card>
   );
 }
 
@@ -1913,18 +2705,22 @@ function splitCsvLine(line: string) {
 function CartonRow({ carton, warehouse, product, canReverse = false, onReverse }: { carton: Carton; warehouse: string; product?: Product; canReverse?: boolean; onReverse?: (barcode: string, reason: string) => void }) {
   const [reason, setReason] = useState("");
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3">
+    <div className="ds-row-card">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate font-mono text-xs font-bold text-slate-950">{carton.barcode}</div>
-          <div className="mt-1 text-sm font-bold">{carton.sku} / {product?.flavour ?? carton.flavour} / {carton.cartonNo}</div>
-          <div className="mt-1 text-xs text-slate-500">{warehouse} / Batch {carton.batch} / Exp {carton.expiry}</div>
+          <div className="truncate font-mono text-xs font-bold text-[var(--text-strong)]">...{carton.barcode.slice(-14)}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm font-bold">
+            <Tag mono>{carton.sku}</Tag>
+            <span>{product?.flavour ?? carton.flavour}</span>
+            <Tag mono>{carton.cartonNo}</Tag>
+          </div>
+          <div className="mt-2 text-xs text-[var(--text-muted)]">{warehouse} / Batch {carton.batch} / Exp {carton.expiry}</div>
         </div>
-        <span className={`shrink-0 rounded-md px-2 py-1 text-xs font-bold ${lockedStatuses.includes(carton.status) ? "bg-rose-100 text-rose-800" : "bg-emerald-100 text-emerald-800"}`}>{carton.status}</span>
+        <StatusBadge status={carton.status} />
       </div>
       {canReverse && onReverse ? (
         <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
-          <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reversal reason" className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm" />
+          <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reversal reason" className="mm-input min-h-10 text-sm" />
           <Button variant="danger" disabled={!reason.trim()} onClick={() => onReverse(carton.barcode, reason)}>
             <XCircle size={18} /> Reverse
           </Button>
@@ -1937,22 +2733,26 @@ function CartonRow({ carton, warehouse, product, canReverse = false, onReverse }
 function DocumentCard({ doc, onReprint }: { doc: DocumentRecord; onReprint: (doc: DocumentRecord, reason: string) => void }) {
   const [reason, setReason] = useState("");
   return (
-    <div className="rounded-lg border border-slate-200 p-4">
+    <Card>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-bold">{doc.type}</div>
-          <div className="font-mono text-xs text-slate-500">{doc.id}</div>
+          <div className="font-bold text-[var(--text-strong)]">{doc.type}</div>
+          <div className="font-mono text-xs text-[var(--text-muted)]">{doc.id}</div>
         </div>
-        <FileText className="text-emerald-700" />
+        <FileText className="text-[var(--blue-600)]" />
       </div>
-      <div className="mt-3 text-sm text-slate-600">{doc.source ?? "-"} -&gt; {doc.destination ?? "-"}</div>
-      <div className="mt-1 text-sm font-semibold">{doc.barcodes.length} cartons</div>
+      <div className="mt-3 text-sm text-[var(--text-muted)]">{doc.source ?? "-"} -&gt; {doc.destination ?? "-"}</div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Tag tone="accent">{doc.barcodes.length} cartons</Tag>
+        {doc.vehicle ? <Tag mono>{doc.vehicle}</Tag> : null}
+        {doc.driver ? <Tag>{doc.driver}</Tag> : null}
+      </div>
       {doc.discrepancy ? <div className="mt-2 rounded-lg bg-amber-50 p-2 text-xs font-bold text-amber-800">{doc.discrepancy}</div> : null}
       <div className="mt-3 grid gap-2">
-        <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reprint reason" className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm" />
+        <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Mandatory reprint reason" className="mm-input min-h-10 text-sm" />
         <Button variant="secondary" disabled={!reason.trim()} onClick={() => onReprint(doc, reason)}><Printer size={18} /> PDF / reprint</Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -1976,14 +2776,14 @@ function ProductsPanel({
   return (
     <section className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
       <form
-        className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200"
+        className="mm-card mm-card--pad"
         onSubmit={(event) => {
           event.preventDefault();
           onAddProduct(new FormData(event.currentTarget));
           event.currentTarget.reset();
         }}
       >
-        <h2 className="text-lg font-bold">Product creation wizard</h2>
+        <h2 className="mm-card__title">Product creation wizard</h2>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <TextField name="name" label="Product name" required defaultValue="Mr Makhana Roasted Makhana" />
           <TextField name="flavour" label="Flavour" required />
@@ -2000,11 +2800,10 @@ function ProductsPanel({
           <TextField name="hsn" label="HSN optional" />
           <SelectField name="status" label="Status"><option value="Active">Active</option><option value="Blocked">Blocked</option></SelectField>
         </div>
-        <TextField name="template" label="Barcode template" required defaultValue={barcodeTemplate} className="mt-4 font-mono text-xs" />
+        <TextField name="template" label="Barcode template" required defaultValue={barcodeTemplate} className="mt-4" mono />
         <Button type="submit" className="mt-4"><Archive size={18} /> Create product</Button>
       </form>
-      <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-        <h2 className="text-lg font-bold">Batch / carton generation</h2>
+      <Card title="Batch / carton generation">
         <div className="mt-4 grid gap-3">
           <SelectField label="Product" value={productId} onChange={(event) => setProductId(event.target.value)}>{products.map((item) => <option key={item.id} value={item.id}>{item.sku} / {item.flavour}</option>)}</SelectField>
           <TextField label="Batch" value={batch} onChange={(event) => setBatch(event.target.value)} />
@@ -2021,10 +2820,10 @@ function ProductsPanel({
             const damagedLost = productCartons.filter((carton) => ["DAMAGED", "LOST"].includes(carton.status)).length;
             const pattern = patterns.find((item) => item.sku === product.sku);
             return (
-              <div key={product.id} className="rounded-lg border border-slate-200 p-3">
-                <div className="font-bold">{product.sku}</div>
-                <div className="text-sm text-slate-500">{product.flavour} / {product.caseQty}{product.qtyUnit} / MRP {product.mrp}</div>
-                <div className="mt-2 font-mono text-xs text-slate-500">{pattern?.exampleBarcode ?? generateBarcode(product, "BATCH1", "00001")}</div>
+            <div key={product.id} className="rounded-xl border border-[var(--border-subtle)] bg-white p-3 shadow-[var(--shadow-xs)]">
+                <div className="flex flex-wrap items-center gap-2 font-bold text-[var(--text-strong)]"><Tag mono>{product.sku}</Tag><span>{product.flavour}</span></div>
+                <div className="mt-2 text-sm text-[var(--text-muted)]">{product.caseQty}{product.qtyUnit} / MRP {product.mrp}</div>
+                <div className="mt-2 font-mono text-xs text-[var(--text-muted)]">{pattern?.exampleBarcode ?? generateBarcode(product, "BATCH1", "00001")}</div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-3">
                   <Stat label="Valid range" value="00001-99999" />
                   <Stat label="Actual cartons" value={productCartons.length} tone="emerald" />
@@ -2037,7 +2836,7 @@ function ProductsPanel({
             );
           })}
         </div>
-      </section>
+      </Card>
     </section>
   );
 }
@@ -2045,10 +2844,11 @@ function ProductsPanel({
 function ReportTable({ title, rows }: { title: string; rows: Record<string, string | number | undefined>[] }) {
   const headers = Object.keys(rows[0] ?? { empty: "" });
   return (
-    <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+    <Card pad={false}>
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-bold">{title}</h2>
+        <h2 className="mm-card__title p-5 pb-0">{title}</h2>
         <Button
+          className="mr-5 mt-5"
           variant="secondary"
           onClick={() => {
             const csv = [headers.join(","), ...rows.map((row) => headers.map((header) => JSON.stringify(row[header] ?? "")).join(","))].join("\n");
@@ -2064,23 +2864,24 @@ function ReportTable({ title, rows }: { title: string; rows: Record<string, stri
           <Download size={18} /> CSV
         </Button>
       </div>
-      <div className="mt-4 overflow-auto">
-        <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+      <div className="ds-table-wrap mt-4">
+        <table className="ds-table min-w-[720px]">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
-              {headers.map((header) => <th key={header} className="p-3 font-bold capitalize text-slate-600">{header}</th>)}
+            <tr>
+              {headers.map((header) => <th key={header}>{header}</th>)}
             </tr>
           </thead>
           <tbody>
             {rows.slice(0, 80).map((row, index) => (
-              <tr key={index} className="border-b border-slate-100">
-                {headers.map((header) => <td key={header} className="max-w-[260px] truncate p-3">{row[header]}</td>)}
+              <tr key={index}>
+                {headers.map((header) => <td key={header} className="max-w-[260px] truncate">{row[header]}</td>)}
               </tr>
             ))}
           </tbody>
         </table>
+        {!rows.length ? <EmptyState text="No rows to report yet." /> : null}
       </div>
-    </section>
+    </Card>
   );
 }
 
@@ -2092,10 +2893,6 @@ function MismatchApproval({ onApprove }: { onApprove: (reason: string) => void }
       <Button disabled={!reason.trim()} onClick={() => onApprove(reason)}><CheckCircle2 size={18} /> Approve</Button>
     </div>
   );
-}
-
-function EmptyState({ text, compact = false }: { text: string; compact?: boolean }) {
-  return <div className={`rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center text-sm font-semibold text-slate-500 ${compact ? "p-3" : "p-8"}`}>{text}</div>;
 }
 
 function findDuplicates(items: string[]) {

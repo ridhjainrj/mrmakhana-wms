@@ -104,6 +104,7 @@ function dbToApp({
       goLiveAt: typeof appMode.go_live_at === "string" ? appMode.go_live_at : undefined,
       supabaseProjectRef: typeof settingsByKey.supabase_project_ref?.project_ref === "string" ? settingsByKey.supabase_project_ref.project_ref : undefined,
     },
+    managementConfig: settingsByKey.management_config ?? {},
     users: profiles.map((item) => {
       const role = String(item.role);
       const credentials = roleCredentials[role] ?? { email: `${role.toLowerCase().replaceAll(" ", ".")}@mrmakhana.test`, password: "Password@123" };
@@ -263,6 +264,7 @@ function appToDb(state: Record<string, unknown>) {
     settings: [
       { key: "app_mode", value: { mode: settings.mode, phase: "uat", go_live_at: settings.goLiveAt ?? null } },
       { key: "supabase_project_ref", value: { project_ref: settings.supabaseProjectRef ?? "yagdnrnfqbqcqgcbejuc" } },
+      { key: "management_config", value: state.managementConfig ?? {} },
     ],
     products: ((state.products as Record<string, unknown>[]) ?? []).map((item) => ({
       id: item.id,
