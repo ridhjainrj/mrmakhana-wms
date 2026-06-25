@@ -758,8 +758,13 @@ export default function Home() {
       setScanMessage({ type: "error", text: "Admin/Accountant reprints require a reason." });
       return;
     }
-    await downloadDocument(doc);
     audit("Document reprinted", { documentRef: doc.id, reason });
+    try {
+      await downloadDocument(doc);
+      setScanMessage({ type: "ok", text: `${doc.id} PDF generated and reprint audit saved.` });
+    } catch {
+      setScanMessage({ type: "error", text: "PDF generation failed, but the reprint attempt was audited." });
+    }
   }
 
   function exportCsv(name: string, rows: Record<string, string | number | undefined>[]) {
