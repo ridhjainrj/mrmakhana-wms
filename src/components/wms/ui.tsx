@@ -12,6 +12,7 @@ type ButtonProps = {
   variant?: "primary" | "secondary" | "danger" | "ghost" | "accent" | "brand";
   disabled?: boolean;
   type?: "button" | "submit";
+  form?: string;
   className?: string;
   size?: "sm" | "md" | "lg";
   block?: boolean;
@@ -19,10 +20,11 @@ type ButtonProps = {
   style?: CSSProperties;
 };
 
-export function Button({ children, onClick, variant = "primary", disabled = false, type = "button", className = "", size = "md", block = false, iconLeft, style }: ButtonProps) {
+export function Button({ children, onClick, variant = "primary", disabled = false, type = "button", form, className = "", size = "md", block = false, iconLeft, style }: ButtonProps) {
   return (
     <button
       type={type}
+      form={form}
       disabled={disabled}
       onClick={onClick}
       style={style}

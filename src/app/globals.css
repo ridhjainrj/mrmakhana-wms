@@ -1694,6 +1694,60 @@ input[type="file"]::file-selector-button {
   margin-top: 8px;
 }
 
+.admin-panel {
+  display: grid;
+  gap: 24px;
+}
+
+.admin-create-form {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(150px, 1fr)) auto;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--slate-25);
+  padding: 16px;
+}
+
+.admin-create-form--wide {
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
+.admin-inline-form {
+  display: contents;
+}
+
+.admin-cell-input {
+  min-height: 36px;
+  width: 100%;
+  min-width: 132px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: #fff;
+  color: var(--text-strong);
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.admin-cell-input:disabled {
+  background: var(--slate-50);
+  color: var(--text-muted);
+}
+
+.admin-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.admin-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 @media (max-width: 1080px) {
   .ds-kpi-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1800,7 +1854,9 @@ input[type="file"]::file-selector-button {
   .ops-filter-grid,
   .ops-form-grid,
   .ops-scan-form,
-  .ops-wizard {
+  .ops-wizard,
+  .admin-create-form,
+  .admin-create-form--wide {
     grid-template-columns: 1fr;
   }
 

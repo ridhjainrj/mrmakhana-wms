@@ -60,6 +60,47 @@ async function deleteMissingRows(table: string, keepIds: string[]) {
   });
 }
 
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function loadCurrentAppState() {
+  const [settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit, barcodePatterns] = await Promise.all([
+    selectRows("system_settings", "key.asc"),
+    selectRows("warehouses", "name.asc"),
+    selectRows("profiles", "created_at.asc"),
+    selectRows("products"),
+    selectRows("cartons"),
+    selectRows("scan_sessions"),
+    selectRows("documents"),
+    selectRows("mismatch_cases"),
+    selectRows("audit_logs"),
+    selectRows("barcode_patterns"),
+  ]);
+  const state = dbToApp({ settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit, barcodePatterns }) as Record<string, unknown>;
+  state.registry = state.cartons;
+  return state;
+}
+
+function hasAdminManagedChanges(incoming: Record<string, unknown>, current: Record<string, unknown>) {
+  const incomingConfig = (incoming.managementConfig as Record<string, unknown>) ?? {};
+  const currentConfig = (current.managementConfig as Record<string, unknown>) ?? {};
+  const checks: Array<[unknown, unknown]> = [
+    [incoming.users, current.users],
+    [incoming.warehouses, current.warehouses],
+    [incoming.products, current.products],
+    [incoming.barcodePatterns, current.barcodePatterns],
+    [incomingConfig.permissions, currentConfig.permissions],
+    [incomingConfig.settings, currentConfig.settings],
+    [incomingConfig.masters, currentConfig.masters],
+  ];
+  return checks.some(([next, prev]) => stableStringify(next ?? null) !== stableStringify(prev ?? null));
+}
+
 function asNumber(value: unknown) {
   return typeof value === "number" ? value : Number(value ?? 0);
 }
@@ -97,6 +138,31 @@ function dbToApp({
   );
   const settingsByKey = Object.fromEntries(settings.map((item) => [String(item.key), item.value as Record<string, unknown>]));
   const appMode = settingsByKey.app_mode ?? {};
+  const managementConfig = (settingsByKey.management_config ?? {}) as Record<string, unknown>;
+  const managedUsers = Array.isArray(managementConfig.managedUsers) ? managementConfig.managedUsers as SupabaseRow[] : [];
+  const managedWarehouses = Array.isArray(managementConfig.managedWarehouses) ? managementConfig.managedWarehouses as SupabaseRow[] : [];
+  const profileUsers = profiles.map((item) => {
+    const role = String(item.role);
+    const credentials = roleCredentials[role] ?? { email: `${role.toLowerCase().replaceAll(" ", ".")}@mrmakhana.test`, password: "Password@123" };
+    return {
+      id: String(item.id),
+      name: String(item.full_name),
+      email: credentials.email,
+      password: credentials.password,
+      role,
+      warehouseId: warehouseAliasByDbId[String(item.warehouse_id)] ?? "factory",
+      warehouseAccess: [warehouseAliasByDbId[String(item.warehouse_id)] ?? "factory"],
+      disabled: false,
+      archived: false,
+    };
+  });
+  const warehouseRecords = warehouses.map((item) => ({
+    id: warehouseNameToStableId(String(item.name)),
+    dbId: String(item.id),
+    name: String(item.name),
+    type: item.type,
+    archived: Boolean(item.archived),
+  }));
 
   return {
     settings: {
@@ -104,25 +170,9 @@ function dbToApp({
       goLiveAt: typeof appMode.go_live_at === "string" ? appMode.go_live_at : undefined,
       supabaseProjectRef: typeof settingsByKey.supabase_project_ref?.project_ref === "string" ? settingsByKey.supabase_project_ref.project_ref : undefined,
     },
-    managementConfig: settingsByKey.management_config ?? {},
-    users: profiles.map((item) => {
-      const role = String(item.role);
-      const credentials = roleCredentials[role] ?? { email: `${role.toLowerCase().replaceAll(" ", ".")}@mrmakhana.test`, password: "Password@123" };
-      return {
-        id: String(item.id),
-        name: String(item.full_name),
-        email: credentials.email,
-        password: credentials.password,
-        role,
-        warehouseId: warehouseAliasByDbId[String(item.warehouse_id)] ?? "factory",
-      };
-    }),
-    warehouses: warehouses.map((item) => ({
-      id: warehouseNameToStableId(String(item.name)),
-      dbId: String(item.id),
-      name: String(item.name),
-      type: item.type,
-    })),
+    managementConfig,
+    users: managedUsers.length ? managedUsers : profileUsers,
+    warehouses: managedWarehouses.length ? managedWarehouses : warehouseRecords,
     products: products.map((item) => ({
       id: String(item.id),
       name: String(item.name),
@@ -259,12 +309,17 @@ function appToDb(state: Record<string, unknown>) {
   const validUserId = (value: unknown) => (isUuid(value) && userIds.has(String(value)) ? value : null);
   const warehouseDbId = Object.fromEntries(warehouses.map((item) => [String(item.id), String(item.dbId ?? item.id)]));
   const settings = state.settings as Record<string, unknown>;
+  const managementConfig = {
+    ...((state.managementConfig as Record<string, unknown>) ?? {}),
+    managedUsers: (state.users as Record<string, unknown>[]) ?? [],
+    managedWarehouses: warehouses,
+  };
 
   return {
     settings: [
       { key: "app_mode", value: { mode: settings.mode, phase: "uat", go_live_at: settings.goLiveAt ?? null } },
       { key: "supabase_project_ref", value: { project_ref: settings.supabaseProjectRef ?? "yagdnrnfqbqcqgcbejuc" } },
-      { key: "management_config", value: state.managementConfig ?? {} },
+      { key: "management_config", value: managementConfig },
     ],
     products: ((state.products as Record<string, unknown>[]) ?? []).map((item) => ({
       id: item.id,
@@ -420,6 +475,11 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const state = (await request.json()) as Record<string, unknown>;
+    const role = request.headers.get("x-wms-role") ?? "";
+    const currentState = await loadCurrentAppState();
+    if (hasAdminManagedChanges(state, currentState) && role !== "Admin") {
+      return NextResponse.json({ error: "Admin role required for users, roles, locations, products, barcode templates, permissions, and settings." }, { status: 403 });
+    }
     const rows = appToDb(state);
     await upsertRows("system_settings", rows.settings, "key");
     await upsertRows("products", rows.products);

@@ -82,6 +82,10 @@ type User = {
   password: string;
   role: Role;
   warehouseId: string;
+  warehouseAccess?: string[];
+  disabled?: boolean;
+  archived?: boolean;
+  passwordResetAt?: string;
 };
 
 type Product = {
@@ -129,7 +133,8 @@ type WarehouseRecord = {
   id: string;
   dbId?: string;
   name: string;
-  type: "factory" | "warehouse" | "transit";
+  type: "factory" | "warehouse" | "transit" | "damage-hold" | "virtual";
+  archived?: boolean;
 };
 
 type Carton = {
@@ -247,6 +252,12 @@ type MasterKey =
   | "transporters"
   | "vehicles"
   | "drivers"
+  | "locations"
+  | "skus"
+  | "barcodeTemplates"
+  | "batches"
+  | "documentNumbering"
+  | "approvalRules"
   | "approvalReasons"
   | "adjustmentReasons"
   | "damageReasons"
@@ -289,6 +300,8 @@ type ManagementConfig = {
   masters: Record<MasterKey, MasterRecord[]>;
   permissions: PermissionGrant[];
   settings: ManagementSettings;
+  managedUsers: User[];
+  managedWarehouses: WarehouseRecord[];
 };
 
 type AppState = {
@@ -370,6 +383,7 @@ function buildPattern(product: Product, batchPattern = "{BATCH}", exampleBatch =
 }
 
 const permissionModules = [
+  "Admin Panel",
   "Dashboard",
   "Dispatches",
   "Scan",
@@ -428,6 +442,24 @@ function defaultManagementConfig(): ManagementConfig {
         masterRecord("Viewer", "VIEW", "Read-only management visibility"),
       ],
       customers: [masterRecord("Modern Trade Customer", "CUST-MODERN", "Default customer dispatch account")],
+      locations: [
+        masterRecord("Factory", "LOC-FACTORY", "Default production location"),
+        masterRecord("Delhi Warehouse", "LOC-DELHI", "Default receiving warehouse"),
+        masterRecord("In Transit", "LOC-TRANSIT", "Virtual transit location"),
+        masterRecord("Damage Hold", "LOC-DAMAGE", "Quarantine location for damaged cartons"),
+      ],
+      skus: [masterRecord("Default SKU registry", "SKU-MASTER", "SKU records are also generated from Product Master")],
+      barcodeTemplates: [masterRecord("Default carton template", "BCT-DEFAULT", barcodeTemplate)],
+      batches: [masterRecord("Production batch registry", "BAT-MASTER", "Batches are generated from product workflows")],
+      documentNumbering: [
+        masterRecord("Dispatch Slip", "DSP", "Factory and customer dispatch numbering"),
+        masterRecord("Receiving Slip", "RCV", "Warehouse receiving numbering"),
+        masterRecord("Transfer Slip", "TRF", "Warehouse transfer numbering"),
+      ],
+      approvalRules: [
+        masterRecord("Shortage approval", "APR-SHORTAGE", "Admin or Accountant approval required"),
+        masterRecord("Barcode reprint approval", "APR-REPRINT", "Reason and audit log required"),
+      ],
       transporters: [masterRecord("Primary Transporter", "TRN-PRIMARY", "Default logistics partner")],
       vehicles: [masterRecord("Default Vehicle", "VEH-001", "Use only for UAT workflows")],
       drivers: [masterRecord("Default Driver", "DRV-001", "Use only for UAT workflows")],
@@ -466,6 +498,8 @@ function defaultManagementConfig(): ManagementConfig {
       cartonNumberLength: 5,
       documentPrefixes: { batch: "BAT", dispatch: "DSP", receiving: "RCV", transfer: "TRF", customerDispatch: "CUS", damage: "DMG", shortage: "SHR", adjustment: "ADJ" },
     },
+    managedUsers: [],
+    managedWarehouses: [],
   };
 }
 
@@ -475,6 +509,8 @@ function normalizeManagementConfig(raw?: Partial<ManagementConfig>): ManagementC
     masters: { ...defaults.masters, ...(raw?.masters ?? {}) },
     permissions: raw?.permissions?.length ? raw.permissions : defaults.permissions,
     settings: { ...defaults.settings, ...(raw?.settings ?? {}) },
+    managedUsers: Array.isArray(raw?.managedUsers) ? raw.managedUsers : defaults.managedUsers,
+    managedWarehouses: Array.isArray(raw?.managedWarehouses) ? raw.managedWarehouses : defaults.managedWarehouses,
   };
 }
 
@@ -651,7 +687,7 @@ export default function Home() {
     setBackendMessage("Saving operational data to Supabase...");
     fetch("/api/wms", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-wms-user-id": user?.id ?? "", "x-wms-role": user?.role ?? "anonymous" },
       body: JSON.stringify({ ...next, registry: next.cartons, barcodePatterns: next.barcodePatterns ?? [] }),
     })
       .then(async (response) => {
@@ -663,7 +699,7 @@ export default function Home() {
         setBackendStatus("error");
         setBackendMessage(error instanceof Error ? error.message : "Supabase save failed.");
       });
-  }, []);
+  }, [user?.id, user?.role]);
 
   function mutate(updater: (draft: AppState) => void) {
     setState((current) => {
@@ -691,9 +727,13 @@ export default function Home() {
   }
 
   function login() {
-    const found = state.users.find((item) => item.email.toLowerCase() === email.toLowerCase() && item.password === password);
+  const found = state.users.find((item) => item.email.toLowerCase() === email.toLowerCase() && item.password === password);
     if (!found) {
       setLoginError("Invalid email or password.");
+      return;
+    }
+    if (found.disabled || found.archived) {
+      setLoginError("This user is disabled or archived. Contact Admin.");
       return;
     }
     setLoginError("");
@@ -1434,6 +1474,167 @@ export default function Home() {
     });
   }
 
+  function updateMasterRecord(masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">>) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const record = draft.managementConfig.masters[masterKey]?.find((item) => item.id === id);
+      if (!record) return;
+      const oldValue = `${record.code}:${record.name}`;
+      record.name = updates.name?.trim() || record.name;
+      record.code = updates.code?.trim().toUpperCase() || record.code;
+      record.description = updates.description ?? record.description;
+      record.owner = user.name;
+      record.updatedAt = now();
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Master data edited", oldValue, newValue: `${masterKey}:${record.code}:${record.name}` });
+    });
+  }
+
+  function addAdminUser(form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    const emailValue = String(form.get("email") ?? "").trim().toLowerCase();
+    const nameValue = String(form.get("name") ?? "").trim();
+    const roleValue = String(form.get("role") ?? "Viewer") as Role;
+    const warehouseValue = String(form.get("warehouseId") ?? primaryWarehouseId);
+    const passwordValue = String(form.get("password") ?? "Password@123");
+    if (!emailValue || !nameValue || state.users.some((item) => item.email.toLowerCase() === emailValue)) return;
+    mutate((draft) => {
+      const nextUser: User = {
+        id: uid("user"),
+        name: nameValue,
+        email: emailValue,
+        password: passwordValue,
+        role: roleValue,
+        warehouseId: warehouseValue,
+        warehouseAccess: [warehouseValue],
+        disabled: false,
+        archived: false,
+      };
+      draft.users.unshift(nextUser);
+      draft.managementConfig.managedUsers = draft.users;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "User created", newValue: `${nextUser.email}:${nextUser.role}` });
+    });
+  }
+
+  function updateAdminUser(id: string, form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const target = draft.users.find((item) => item.id === id);
+      if (!target) return;
+      const oldValue = `${target.email}:${target.role}:${target.warehouseId}`;
+      target.name = String(form.get("name") ?? target.name).trim() || target.name;
+      target.email = String(form.get("email") ?? target.email).trim().toLowerCase() || target.email;
+      target.role = String(form.get("role") ?? target.role) as Role;
+      target.warehouseId = String(form.get("warehouseId") ?? target.warehouseId);
+      target.warehouseAccess = [target.warehouseId];
+      target.disabled = form.get("disabled") === "on";
+      draft.managementConfig.managedUsers = draft.users;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "User edited", oldValue, newValue: `${target.email}:${target.role}:${target.warehouseId}` });
+    });
+  }
+
+  function archiveAdminUser(id: string) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const target = draft.users.find((item) => item.id === id);
+      if (!target) return;
+      if (target.role === "Admin" && draft.users.filter((item) => item.role === "Admin" && !item.archived && !item.disabled).length <= 1) return;
+      target.archived = true;
+      target.disabled = true;
+      draft.managementConfig.managedUsers = draft.users;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "User archived", newValue: target.email, reason: "Archive used instead of hard delete" });
+    });
+  }
+
+  function resetAdminPassword(id: string) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const target = draft.users.find((item) => item.id === id);
+      if (!target) return;
+      const oldValue = target.password;
+      target.password = `Reset@${new Date().toISOString().slice(5, 10).replace("-", "")}`;
+      target.passwordResetAt = now();
+      draft.managementConfig.managedUsers = draft.users;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "User password reset", oldValue: oldValue ? "set" : "empty", newValue: `${target.email}:temporary password issued` });
+    });
+  }
+
+  function addLocation(form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    const nameValue = String(form.get("name") ?? "").trim();
+    const typeValue = String(form.get("type") ?? "warehouse") as WarehouseRecord["type"];
+    if (!nameValue) return;
+    mutate((draft) => {
+      if (draft.warehouses.some((item) => item.name.toLowerCase() === nameValue.toLowerCase())) return;
+      const location: WarehouseRecord = { id: normalizeSkuPart(nameValue).toLowerCase(), name: nameValue, type: typeValue, archived: false };
+      draft.warehouses.push(location);
+      draft.managementConfig.managedWarehouses = draft.warehouses;
+      draft.managementConfig.masters.locations.unshift(masterRecord(location.name, `LOC-${normalizeSkuPart(location.name).slice(0, 16)}`, `${location.type} location`, user.name));
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Location created", newValue: `${location.name}:${location.type}` });
+    });
+  }
+
+  function updateLocation(id: string, form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const location = draft.warehouses.find((item) => item.id === id);
+      if (!location) return;
+      const oldValue = `${location.name}:${location.type}`;
+      location.name = String(form.get("name") ?? location.name).trim() || location.name;
+      location.type = String(form.get("type") ?? location.type) as WarehouseRecord["type"];
+      draft.managementConfig.managedWarehouses = draft.warehouses;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Location edited", oldValue, newValue: `${location.name}:${location.type}` });
+    });
+  }
+
+  function archiveLocation(id: string) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const location = draft.warehouses.find((item) => item.id === id);
+      if (!location) return;
+      const hasInventory = draft.cartons.some((carton) => carton.warehouseId === id && !carton.archived);
+      const hasUsers = draft.users.some((item) => item.warehouseId === id && !item.archived);
+      const hasDocuments = draft.documents.some((doc) => doc.source === location.name || doc.destination === location.name);
+      if (hasInventory || hasUsers || hasDocuments) {
+        draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Location archive blocked", newValue: location.name, reason: "Location has inventory, users, or transaction history" });
+        return;
+      }
+      location.archived = true;
+      draft.managementConfig.managedWarehouses = draft.warehouses;
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Location archived", newValue: location.name, reason: "Archive used instead of hard delete" });
+    });
+  }
+
+  function updateProductAdmin(productId: string, form: FormData) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const product = draft.products.find((item) => item.id === productId);
+      if (!product) return;
+      const oldValue = product.sku;
+      product.name = String(form.get("name") ?? product.name).trim() || product.name;
+      product.sku = String(form.get("sku") ?? product.sku).trim() || product.sku;
+      product.gtin = String(form.get("gtin") ?? product.gtin).trim() || product.gtin;
+      product.status = String(form.get("status") ?? product.status) as Product["status"];
+      product.template = String(form.get("template") ?? product.template).trim() || product.template;
+      const pattern = draft.barcodePatterns.find((item) => item.productId === product.id);
+      if (pattern) Object.assign(pattern, buildPattern(product), { id: pattern.id, productId: product.id });
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Product edited", oldValue, newValue: product.sku });
+    });
+  }
+
+  function archiveProductAdmin(productId: string) {
+    if (!user || user.role !== "Admin") return;
+    mutate((draft) => {
+      const product = draft.products.find((item) => item.id === productId);
+      if (!product) return;
+      product.archived = true;
+      product.status = "Blocked";
+      draft.barcodePatterns.filter((item) => item.productId === product.id).forEach((pattern) => {
+        pattern.archived = true;
+      });
+      draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Product archived", newValue: product.sku, reason: "Archive used instead of hard delete; carton history preserved" });
+    });
+  }
+
   function togglePermission(role: Role, module: string, action: PermissionAction) {
     if (!user || user.role !== "Admin") return;
     mutate((draft) => {
@@ -1594,6 +1795,7 @@ export default function Home() {
     {
       title: "System",
       items: [
+        { label: "Admin Panel", icon: ShieldCheck, show: user.role === "Admin" },
         { label: "Import Data", icon: Upload, show: hasPermission(state, user, "Import Data", "view") },
         { label: "Documents", icon: FileText, show: hasPermission(state, user, "Documents", "view") },
         { label: "Reports", icon: BarChart3, show: hasPermission(state, user, "Reports", "view") },
@@ -1679,6 +1881,7 @@ export default function Home() {
     Customers: "Customer dispatch visibility derived from shipment records.",
     Users: "Role-based users and warehouse assignments.",
     Locations: "Factory, warehouse, and transit location analytics.",
+    "Admin Panel": "Admin control centre for users, roles, masters, locations, products, settings, and audit safety.",
     "Import Data": "Excel SKU master import with validation and duplicate checks.",
     Documents: "Dispatch, receiving, transfer, and batch slips.",
     Reports: "Operational reports generated from Supabase-backed data.",
@@ -2045,53 +2248,44 @@ export default function Home() {
                 {!customerDispatches.length ? <EmptyState text="No customer dispatch records yet." /> : null}
               </div>
             </Card>
-            <MasterDataCenter title="Customer Master" masterKey="customers" records={state.managementConfig.masters.customers} canManage={hasPermission(state, user, "Customers", "create")} onAdd={addMasterRecord} onStatus={setMasterStatus} />
+            <MasterDataCenter title="Customer Master" masterKey="customers" records={state.managementConfig.masters.customers} canManage={hasPermission(state, user, "Customers", "create")} onAdd={addMasterRecord} onEdit={updateMasterRecord} onStatus={setMasterStatus} />
           </section>
         ) : null}
 
         {view === "Users" ? (
-          <Card title="Users and Roles" pad={false}>
-            <div className="ds-table-wrap">
-              <table className="ds-table">
-                <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Warehouse</th></tr></thead>
-                <tbody>
-                  {state.users.map((item) => (
-                    <tr key={item.id}>
-                      <td>{item.name}</td>
-                      <td className="ds-mono">{item.email}</td>
-                      <td><Tag tone="brand">{item.role}</Tag></td>
-                      <td>{warehouseById[item.warehouseId]}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+          <AdminUsersPanel users={state.users} warehouses={state.warehouses} audit={state.audit} canManage={user.role === "Admin"} onAdd={addAdminUser} onUpdate={updateAdminUser} onArchive={archiveAdminUser} onResetPassword={resetAdminPassword} />
         ) : null}
 
         {view === "Locations" ? (
-          <section className="ds-screen">
-            <Card title="Location Analytics">
-              <WarehouseBars warehouses={state.warehouses.map((warehouse) => ({ label: warehouse.name, count: visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length }))} total={Math.max(visibleCartons.length, 1)} />
-            </Card>
-            <Card title="Location Details" pad={false}>
-              <div className="ds-table-wrap">
-                <table className="ds-table">
-                  <thead><tr><th>Location</th><th>Type</th><th>Cartons</th><th>Users</th></tr></thead>
-                  <tbody>
-                    {state.warehouses.map((warehouse) => (
-                      <tr key={warehouse.id}>
-                        <td>{warehouse.name}</td>
-                        <td><Tag>{warehouse.type}</Tag></td>
-                        <td className="ds-mono">{visibleCartons.filter((carton) => carton.warehouseId === warehouse.id).length}</td>
-                        <td className="ds-mono">{state.users.filter((item) => item.warehouseId === warehouse.id).length}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          </section>
+          <AdminLocationsPanel warehouses={state.warehouses} cartons={visibleCartons} users={state.users} documents={state.documents} canManage={user.role === "Admin"} onAdd={addLocation} onUpdate={updateLocation} onArchive={archiveLocation} />
+        ) : null}
+
+        {view === "Admin Panel" ? (
+          <AdminPanel
+            users={state.users}
+            warehouses={state.warehouses}
+            products={state.products}
+            cartons={state.cartons}
+            documents={state.documents}
+            audit={state.audit}
+            config={state.managementConfig}
+            canManage={user.role === "Admin"}
+            onAddUser={addAdminUser}
+            onUpdateUser={updateAdminUser}
+            onArchiveUser={archiveAdminUser}
+            onResetPassword={resetAdminPassword}
+            onAddLocation={addLocation}
+            onUpdateLocation={updateLocation}
+            onArchiveLocation={archiveLocation}
+            onAddMaster={addMasterRecord}
+            onEditMaster={updateMasterRecord}
+            onStatusMaster={setMasterStatus}
+            onTogglePermission={togglePermission}
+            onSaveSettings={updateManagementSettings}
+            onAddProduct={addProduct}
+            onUpdateProduct={updateProductAdmin}
+            onArchiveProduct={archiveProductAdmin}
+          />
         ) : null}
 
         {view === "Import Data" ? (
@@ -2264,7 +2458,7 @@ export default function Home() {
             </Card>
             <SystemSettingsPanel settings={state.managementConfig.settings} warehouses={state.warehouses} onSave={updateManagementSettings} />
             <PermissionMatrix permissions={state.managementConfig.permissions} onToggle={togglePermission} />
-            <MasterDataSuite config={state.managementConfig} canManage={user.role === "Admin"} onAdd={addMasterRecord} onStatus={setMasterStatus} />
+            <MasterDataSuite config={state.managementConfig} canManage={user.role === "Admin"} onAdd={addMasterRecord} onEdit={updateMasterRecord} onStatus={setMasterStatus} />
             <AdminSafetyPanel products={state.products} warehouses={state.warehouses} cartons={state.cartons} documents={state.documents} users={state.users} />
           </section>
         ) : null}
@@ -2335,12 +2529,260 @@ function RoleWorkspace({
   );
 }
 
+function AdminPanel({
+  users,
+  warehouses,
+  products,
+  cartons,
+  documents,
+  audit,
+  config,
+  canManage,
+  onAddUser,
+  onUpdateUser,
+  onArchiveUser,
+  onResetPassword,
+  onAddLocation,
+  onUpdateLocation,
+  onArchiveLocation,
+  onAddMaster,
+  onEditMaster,
+  onStatusMaster,
+  onTogglePermission,
+  onSaveSettings,
+  onAddProduct,
+  onUpdateProduct,
+  onArchiveProduct,
+}: {
+  users: User[];
+  warehouses: WarehouseRecord[];
+  products: Product[];
+  cartons: Carton[];
+  documents: DocumentRecord[];
+  audit: AuditLog[];
+  config: ManagementConfig;
+  canManage: boolean;
+  onAddUser: (form: FormData) => void;
+  onUpdateUser: (id: string, form: FormData) => void;
+  onArchiveUser: (id: string) => void;
+  onResetPassword: (id: string) => void;
+  onAddLocation: (form: FormData) => void;
+  onUpdateLocation: (id: string, form: FormData) => void;
+  onArchiveLocation: (id: string) => void;
+  onAddMaster: (masterKey: MasterKey, form: FormData) => void;
+  onEditMaster: (masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">>) => void;
+  onStatusMaster: (masterKey: MasterKey, id: string, status: MasterStatus) => void;
+  onTogglePermission: (role: Role, module: string, action: PermissionAction) => void;
+  onSaveSettings: (form: FormData) => void;
+  onAddProduct: (form: FormData) => void;
+  onUpdateProduct: (id: string, form: FormData) => void;
+  onArchiveProduct: (id: string) => void;
+}) {
+  return (
+    <section className="admin-panel">
+      <div className="ops-toolbar">
+        <div>
+          <h2>Admin Control Centre</h2>
+          <p>Create, edit, archive, configure, and audit the WMS without developer intervention.</p>
+        </div>
+        <Tag tone="brand">Archive-first safety</Tag>
+      </div>
+      <div className="ops-kpi-row">
+        <Stat label="Users" value={users.filter((item) => !item.archived).length} />
+        <Stat label="Locations" value={warehouses.filter((item) => !item.archived).length} tone="accent" />
+        <Stat label="Products / SKUs" value={products.filter((item) => !item.archived).length} tone="brand" />
+        <Stat label="Audit events" value={audit.length} tone="warning" />
+      </div>
+      <AdminUsersPanel users={users} warehouses={warehouses} audit={audit} canManage={canManage} onAdd={onAddUser} onUpdate={onUpdateUser} onArchive={onArchiveUser} onResetPassword={onResetPassword} />
+      <AdminLocationsPanel warehouses={warehouses} cartons={cartons} users={users} documents={documents} canManage={canManage} onAdd={onAddLocation} onUpdate={onUpdateLocation} onArchive={onArchiveLocation} />
+      <AdminProductsPanel products={products} cartons={cartons} patterns={[]} canManage={canManage} onAdd={onAddProduct} onUpdate={onUpdateProduct} onArchive={onArchiveProduct} />
+      <PermissionMatrix permissions={config.permissions} onToggle={onTogglePermission} />
+      <SystemSettingsPanel settings={config.settings} warehouses={warehouses} onSave={onSaveSettings} />
+      <MasterDataSuite config={config} canManage={canManage} onAdd={onAddMaster} onEdit={onEditMaster} onStatus={onStatusMaster} />
+      <AdminSafetyPanel products={products} warehouses={warehouses} cartons={cartons} documents={documents} users={users} />
+    </section>
+  );
+}
+
+function AdminUsersPanel({ users, warehouses, audit, canManage, onAdd, onUpdate, onArchive, onResetPassword }: { users: User[]; warehouses: WarehouseRecord[]; audit: AuditLog[]; canManage: boolean; onAdd: (form: FormData) => void; onUpdate: (id: string, form: FormData) => void; onArchive: (id: string) => void; onResetPassword: (id: string) => void }) {
+  return (
+    <Card title="User Management" pad={false}>
+      {canManage ? (
+        <form
+          className="admin-create-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onAdd(new FormData(event.currentTarget));
+            event.currentTarget.reset();
+          }}
+        >
+          <TextField name="name" label="Name" required />
+          <TextField name="email" label="Email" type="email" required />
+          <TextField name="password" label="Temporary password" defaultValue="Password@123" required />
+          <SelectField name="role" label="Role">{(["Admin", "Accountant", "Warehouse Manager", "Operator", "Viewer"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</SelectField>
+          <SelectField name="warehouseId" label="Warehouse access">{warehouses.filter((item) => !item.archived).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</SelectField>
+          <Button type="submit" className="self-end"><UserCog size={18} /> Add user</Button>
+        </form>
+      ) : null}
+      <div className="ds-table-wrap">
+        <table className="ds-table min-w-[1080px]">
+          <thead><tr><th>User</th><th>Email</th><th>Role</th><th>Warehouse</th><th>Status</th><th>Activity</th><th>Actions</th></tr></thead>
+          <tbody>
+            {users.map((item) => (
+              <tr key={item.id}>
+                <td>
+                  <form id={`user-${item.id}`} className="admin-inline-form" onSubmit={(event) => { event.preventDefault(); onUpdate(item.id, new FormData(event.currentTarget)); }}>
+                    <input className="admin-cell-input" name="name" defaultValue={item.name} disabled={!canManage || item.archived} />
+                  </form>
+                </td>
+                <td><input form={`user-${item.id}`} className="admin-cell-input ds-mono" name="email" defaultValue={item.email} disabled={!canManage || item.archived} /></td>
+                <td>
+                  <select form={`user-${item.id}`} name="role" defaultValue={item.role} className="admin-cell-input" disabled={!canManage || item.archived}>
+                    {(["Admin", "Accountant", "Warehouse Manager", "Operator", "Viewer"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}
+                  </select>
+                </td>
+                <td>
+                  <select form={`user-${item.id}`} name="warehouseId" defaultValue={item.warehouseId} className="admin-cell-input" disabled={!canManage || item.archived}>
+                    {warehouses.filter((warehouse) => !warehouse.archived).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                  </select>
+                </td>
+                <td>
+                  <label className="admin-check"><input form={`user-${item.id}`} name="disabled" type="checkbox" defaultChecked={item.disabled} disabled={!canManage || item.archived} /> Disabled</label>
+                  {item.archived ? <StatusBadge tone="slate">Archived</StatusBadge> : null}
+                </td>
+                <td className="ds-mono">{audit.filter((entry) => entry.userId === item.id).length}</td>
+                <td>
+                  <div className="admin-row-actions">
+                    <Button size="sm" type="submit" form={`user-${item.id}`} disabled={!canManage || item.archived}>Save</Button>
+                    <Button size="sm" variant="secondary" disabled={!canManage || item.archived} onClick={() => onResetPassword(item.id)}>Reset</Button>
+                    <Button size="sm" variant="danger" disabled={!canManage || item.archived} onClick={() => onArchive(item.id)}>Archive</Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function AdminLocationsPanel({ warehouses, cartons, users, documents, canManage, onAdd, onUpdate, onArchive }: { warehouses: WarehouseRecord[]; cartons: Carton[]; users: User[]; documents: DocumentRecord[]; canManage: boolean; onAdd: (form: FormData) => void; onUpdate: (id: string, form: FormData) => void; onArchive: (id: string) => void }) {
+  return (
+    <Card title="Factory, Warehouse & Location Management" pad={false}>
+      {canManage ? (
+        <form className="admin-create-form" onSubmit={(event) => { event.preventDefault(); onAdd(new FormData(event.currentTarget)); event.currentTarget.reset(); }}>
+          <TextField name="name" label="Location name" required />
+          <SelectField name="type" label="Location type"><option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">Transit</option><option value="damage-hold">Damage-hold</option><option value="virtual">Virtual</option></SelectField>
+          <Button type="submit" className="self-end"><MapPin size={18} /> Add location</Button>
+        </form>
+      ) : null}
+      <div className="ds-table-wrap">
+        <table className="ds-table min-w-[980px]">
+          <thead><tr><th>Name</th><th>Type</th><th>Cartons</th><th>Users</th><th>History</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            {warehouses.map((warehouse) => {
+              const cartonCount = cartons.filter((carton) => carton.warehouseId === warehouse.id).length;
+              const userCount = users.filter((item) => item.warehouseId === warehouse.id).length;
+              const historyCount = documents.filter((doc) => doc.source === warehouse.name || doc.destination === warehouse.name).length;
+              return (
+                <tr key={warehouse.id}>
+                  <td>
+                    <form id={`loc-${warehouse.id}`} onSubmit={(event) => { event.preventDefault(); onUpdate(warehouse.id, new FormData(event.currentTarget)); }}>
+                      <input className="admin-cell-input" name="name" defaultValue={warehouse.name} disabled={!canManage || warehouse.archived} />
+                    </form>
+                  </td>
+                  <td>
+                    <select form={`loc-${warehouse.id}`} name="type" defaultValue={warehouse.type} className="admin-cell-input" disabled={!canManage || warehouse.archived}>
+                      <option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">Transit</option><option value="damage-hold">Damage-hold</option><option value="virtual">Virtual</option>
+                    </select>
+                  </td>
+                  <td className="ds-mono">{cartonCount}</td>
+                  <td className="ds-mono">{userCount}</td>
+                  <td className="ds-mono">{historyCount}</td>
+                  <td>{warehouse.archived ? <StatusBadge tone="slate">Archived</StatusBadge> : <StatusBadge tone="teal">Active</StatusBadge>}</td>
+                  <td>
+                    <div className="admin-row-actions">
+                      <Button size="sm" type="submit" form={`loc-${warehouse.id}`} disabled={!canManage || warehouse.archived}>Save</Button>
+                      <Button size="sm" variant="danger" disabled={!canManage || warehouse.archived || cartonCount > 0 || userCount > 0 || historyCount > 0} onClick={() => onArchive(warehouse.id)}>Archive</Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function AdminProductsPanel({ products, cartons, canManage, onAdd, onUpdate, onArchive }: { products: Product[]; cartons: Carton[]; patterns: BarcodePattern[]; canManage: boolean; onAdd: (form: FormData) => void; onUpdate: (id: string, form: FormData) => void; onArchive: (id: string) => void }) {
+  return (
+    <Card title="Product, SKU & Barcode Template Management" pad={false}>
+      {canManage ? (
+        <form className="admin-create-form admin-create-form--wide" onSubmit={(event) => { event.preventDefault(); onAdd(new FormData(event.currentTarget)); event.currentTarget.reset(); }}>
+          <TextField name="name" label="Product" required defaultValue="Mr Makhana Roasted Makhana" />
+          <TextField name="flavour" label="Flavour" required />
+          <TextField name="category" label="Category" required defaultValue="Fox Nuts" />
+          <TextField name="sku" label="SKU" required />
+          <TextField name="gtin" label="GTIN" required />
+          <TextField name="prefix" label="Prefix" required defaultValue="MM" />
+          <TextField name="weight" label="Weight" required placeholder="70G" />
+          <TextField name="mrp" label="MRP" type="number" required />
+          <TextField name="caseQty" label="Case qty" type="number" required />
+          <SelectField name="qtyUnit" label="Unit"><option value="pcs">pcs</option><option value="pc">pc</option><option value="p">p</option></SelectField>
+          <TextField name="variantCode" label="Variant" required />
+          <TextField name="shelfLifeDays" label="Shelf life" type="number" required defaultValue={180} />
+          <TextField name="hsn" label="HSN" />
+          <SelectField name="status" label="Status"><option value="Active">Active</option><option value="Blocked">Blocked</option></SelectField>
+          <TextField name="template" label="Barcode template" required defaultValue={barcodeTemplate} className="md:col-span-2" mono />
+          <Button type="submit" className="self-end"><Archive size={18} /> Create SKU</Button>
+        </form>
+      ) : null}
+      <div className="ds-table-wrap">
+        <table className="ds-table min-w-[1180px]">
+          <thead><tr><th>Product</th><th>SKU</th><th>GTIN</th><th>Status</th><th>Cartons</th><th>Barcode Template</th><th>Actions</th></tr></thead>
+          <tbody>
+            {products.map((product) => (
+              <tr key={product.id}>
+                <td>
+                  <form id={`product-${product.id}`} onSubmit={(event) => { event.preventDefault(); onUpdate(product.id, new FormData(event.currentTarget)); }}>
+                    <input className="admin-cell-input" name="name" defaultValue={product.name} disabled={!canManage || product.archived} />
+                  </form>
+                </td>
+                <td><input form={`product-${product.id}`} className="admin-cell-input ds-mono" name="sku" defaultValue={product.sku} disabled={!canManage || product.archived} /></td>
+                <td><input form={`product-${product.id}`} className="admin-cell-input ds-mono" name="gtin" defaultValue={product.gtin} disabled={!canManage || product.archived} /></td>
+                <td>
+                  <select form={`product-${product.id}`} name="status" defaultValue={product.status} className="admin-cell-input" disabled={!canManage || product.archived}>
+                    <option value="Active">Active</option><option value="Blocked">Blocked</option>
+                  </select>
+                  {product.archived ? <StatusBadge tone="slate">Archived</StatusBadge> : null}
+                </td>
+                <td className="ds-mono">{cartons.filter((carton) => carton.productId === product.id).length}</td>
+                <td><input form={`product-${product.id}`} className="admin-cell-input ds-mono min-w-[360px]" name="template" defaultValue={product.template} disabled={!canManage || product.archived} /></td>
+                <td>
+                  <div className="admin-row-actions">
+                    <Button size="sm" type="submit" form={`product-${product.id}`} disabled={!canManage || product.archived}>Save</Button>
+                    <Button size="sm" variant="danger" disabled={!canManage || product.archived} onClick={() => onArchive(product.id)}>Archive</Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
 function MasterDataCenter({
   title,
   masterKey,
   records,
   canManage,
   onAdd,
+  onEdit,
   onStatus,
 }: {
   title: string;
@@ -2348,6 +2790,7 @@ function MasterDataCenter({
   records: MasterRecord[];
   canManage: boolean;
   onAdd: (masterKey: MasterKey, form: FormData) => void;
+  onEdit?: (masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">>) => void;
   onStatus: (masterKey: MasterKey, id: string, status: MasterStatus) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -2385,6 +2828,22 @@ function MasterDataCenter({
                 <td className="ds-mono">{new Date(record.updatedAt).toLocaleDateString()}</td>
                 <td>
                   <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!canManage || !onEdit}
+                      onClick={() => {
+                        const name = window.prompt("Name", record.name);
+                        if (name === null) return;
+                        const code = window.prompt("Code", record.code);
+                        if (code === null) return;
+                        const description = window.prompt("Description", record.description ?? "");
+                        if (description === null) return;
+                        onEdit?.(masterKey, record.id, { name, code, description });
+                      }}
+                    >
+                      Edit
+                    </Button>
                     <Button size="sm" variant="secondary" disabled={!canManage || record.status === "Active"} onClick={() => onStatus(masterKey, record.id, "Active")}>Activate</Button>
                     <Button size="sm" variant="secondary" disabled={!canManage || record.status === "Inactive"} onClick={() => onStatus(masterKey, record.id, "Inactive")}>Deactivate</Button>
                     <Button size="sm" variant="danger" disabled={!canManage || record.status === "Archived"} onClick={() => onStatus(masterKey, record.id, "Archived")}>Archive</Button>
@@ -2400,12 +2859,19 @@ function MasterDataCenter({
   );
 }
 
-function MasterDataSuite({ config, canManage, onAdd, onStatus }: { config: ManagementConfig; canManage: boolean; onAdd: (masterKey: MasterKey, form: FormData) => void; onStatus: (masterKey: MasterKey, id: string, status: MasterStatus) => void }) {
+function MasterDataSuite({ config, canManage, onAdd, onEdit, onStatus }: { config: ManagementConfig; canManage: boolean; onAdd: (masterKey: MasterKey, form: FormData) => void; onEdit: (masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">>) => void; onStatus: (masterKey: MasterKey, id: string, status: MasterStatus) => void }) {
   const masters: { key: MasterKey; title: string }[] = [
     { key: "roles", title: "Roles" },
+    { key: "locations", title: "Locations" },
+    { key: "customers", title: "Customers" },
+    { key: "skus", title: "SKUs" },
+    { key: "barcodeTemplates", title: "Barcode Templates" },
+    { key: "batches", title: "Batches" },
     { key: "transporters", title: "Transporters" },
     { key: "vehicles", title: "Vehicles" },
     { key: "drivers", title: "Drivers" },
+    { key: "documentNumbering", title: "Document Numbering" },
+    { key: "approvalRules", title: "Approval Rules" },
     { key: "approvalReasons", title: "Approval Reasons" },
     { key: "adjustmentReasons", title: "Adjustment Reasons" },
     { key: "damageReasons", title: "Damage Reasons" },
@@ -2414,7 +2880,7 @@ function MasterDataSuite({ config, canManage, onAdd, onStatus }: { config: Manag
   return (
     <section className="grid gap-5">
       {masters.map((item) => (
-        <MasterDataCenter key={item.key} title={item.title} masterKey={item.key} records={config.masters[item.key]} canManage={canManage} onAdd={onAdd} onStatus={onStatus} />
+        <MasterDataCenter key={item.key} title={item.title} masterKey={item.key} records={config.masters[item.key]} canManage={canManage} onAdd={onAdd} onEdit={onEdit} onStatus={onStatus} />
       ))}
     </section>
   );
