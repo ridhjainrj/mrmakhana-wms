@@ -87,6 +87,7 @@ function dbToApp({
   documents,
   mismatches,
   audit,
+  barcodePatterns,
 }: Record<string, SupabaseRow[]>) {
   const warehouseAliasByDbId = Object.fromEntries(
     warehouses.map((item) => [String(item.id), warehouseNameToStableId(String(item.name))]),
@@ -227,6 +228,25 @@ function dbToApp({
       newValue: item.new_value == null ? undefined : String(item.new_value).replace(/^"|"$/g, ""),
       reason: item.reason ? String(item.reason) : undefined,
     })),
+    barcodePatterns: barcodePatterns.map((item) => ({
+      id: String(item.id),
+      productId: String(item.product_id),
+      sku: String(item.sku),
+      prefix: String(item.prefix),
+      gtin: String(item.gtin),
+      batchPattern: String(item.batch_pattern),
+      weight: String(item.weight),
+      caseQty: asNumber(item.case_qty),
+      qtyUnit: item.qty_unit,
+      mrp: asNumber(item.mrp),
+      variantCode: String(item.variant_code),
+      template: String(item.barcode_template),
+      exampleBarcode: String(item.example_barcode),
+      cartonRangeStart: String(item.carton_range_start),
+      cartonRangeEnd: String(item.carton_range_end),
+      dataOrigin: item.data_origin,
+      archived: Boolean(item.archived),
+    })),
     registry: [],
     dbIdByWarehouseAlias,
   };
@@ -351,12 +371,31 @@ function appToDb(state: Record<string, unknown>) {
       reason: item.reason || null,
       created_at: item.time,
     })),
+    barcodePatterns: ((state.barcodePatterns as Record<string, unknown>[]) ?? []).map((item) => ({
+      id: item.id,
+      product_id: item.productId,
+      sku: item.sku,
+      prefix: item.prefix,
+      gtin: item.gtin,
+      batch_pattern: item.batchPattern,
+      weight: item.weight,
+      case_qty: item.caseQty,
+      qty_unit: item.qtyUnit,
+      mrp: item.mrp,
+      variant_code: item.variantCode,
+      barcode_template: item.template,
+      example_barcode: item.exampleBarcode,
+      carton_range_start: item.cartonRangeStart,
+      carton_range_end: item.cartonRangeEnd,
+      data_origin: item.dataOrigin ?? "real",
+      archived: Boolean(item.archived),
+    })),
   };
 }
 
 export async function GET() {
   try {
-    const [settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit] = await Promise.all([
+    const [settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit, barcodePatterns] = await Promise.all([
       selectRows("system_settings", "key.asc"),
       selectRows("warehouses", "name.asc"),
       selectRows("profiles", "created_at.asc"),
@@ -366,8 +405,9 @@ export async function GET() {
       selectRows("documents"),
       selectRows("mismatch_cases"),
       selectRows("audit_logs"),
+      selectRows("barcode_patterns"),
     ]);
-    const state = dbToApp({ settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit }) as Record<string, unknown>;
+    const state = dbToApp({ settings, warehouses, profiles, products, cartons, sessions, documents, mismatches, audit, barcodePatterns }) as Record<string, unknown>;
     state.registry = state.cartons;
     return NextResponse.json(state);
   } catch (error) {
@@ -381,6 +421,7 @@ export async function POST(request: Request) {
     const rows = appToDb(state);
     await upsertRows("system_settings", rows.settings, "key");
     await upsertRows("products", rows.products);
+    await upsertRows("barcode_patterns", rows.barcodePatterns);
     await upsertRows("cartons", rows.cartons);
     await upsertRows("scan_sessions", rows.sessions);
     await upsertRows("documents", rows.documents);
@@ -390,6 +431,7 @@ export async function POST(request: Request) {
     await deleteMissingRows("documents", rows.documents.map((item) => String(item.id)));
     await deleteMissingRows("scan_sessions", rows.sessions.map((item) => String(item.id)));
     await deleteMissingRows("cartons", rows.cartons.map((item) => String(item.id)));
+    await deleteMissingRows("barcode_patterns", rows.barcodePatterns.map((item) => String(item.id)));
     await deleteMissingRows("products", rows.products.map((item) => String(item.id)));
     return NextResponse.json({ ok: true });
   } catch (error) {

@@ -34,6 +34,11 @@ import {
   canRole,
   daysFrom,
   lockedStatuses,
+  maxCartonNo,
+  minCartonNo,
+  normalizeBarcode,
+  normalizeCartonNo,
+  parseQuantityFormat,
   parseTemplateBarcode,
   validateFinalizeRule,
   validateScanRule,
@@ -86,6 +91,26 @@ type Product = {
   hsn?: string;
   status: "Active" | "Blocked";
   template: string;
+  dataOrigin?: DataOrigin;
+  archived?: boolean;
+};
+
+type BarcodePattern = {
+  id: string;
+  productId: string;
+  sku: string;
+  prefix: string;
+  gtin: string;
+  batchPattern: string;
+  weight: string;
+  caseQty: number;
+  qtyUnit: "pcs" | "pc" | "p";
+  mrp: number;
+  variantCode: string;
+  template: string;
+  exampleBarcode: string;
+  cartonRangeStart: string;
+  cartonRangeEnd: string;
   dataOrigin?: DataOrigin;
   archived?: boolean;
 };
@@ -204,6 +229,15 @@ type AppState = {
   mismatches: MismatchCase[];
   audit: AuditLog[];
   registry: Carton[];
+  barcodePatterns: BarcodePattern[];
+};
+
+type ImportPreviewRow = {
+  rowNumber: number;
+  product: Product;
+  pattern: BarcodePattern;
+  status: "valid" | "duplicate" | "error";
+  messages: string[];
 };
 
 function now() {
@@ -219,6 +253,44 @@ function generateBarcode(product: Product, batch: string, cartonNo: string) {
   return buildBarcodeFromTemplate(product, batch, cartonNo);
 }
 
+function normalizeSkuPart(value: string | number | undefined) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9-]/g, "")
+    .toUpperCase();
+}
+
+function buildSkuFromMaster(prefix: string, gtin: string, batch: string, weight: string, qty: number, qtyUnit: string, mrp: number, variant: string) {
+  return [prefix, gtin.slice(-5), batch, weight, `${qty}${qtyUnit}`, mrp, variant].map(normalizeSkuPart).filter(Boolean).join("-");
+}
+
+function patternIdFor(product: Pick<Product, "sku">) {
+  return `pattern-${normalizeSkuPart(product.sku).toLowerCase()}`;
+}
+
+function buildPattern(product: Product, batchPattern = "{BATCH}", exampleBatch = "BATCH1"): BarcodePattern {
+  return {
+    id: patternIdFor(product),
+    productId: product.id,
+    sku: product.sku,
+    prefix: product.prefix,
+    gtin: product.gtin,
+    batchPattern,
+    weight: product.weight,
+    caseQty: product.caseQty,
+    qtyUnit: product.qtyUnit,
+    mrp: product.mrp,
+    variantCode: product.variantCode,
+    template: product.template,
+    exampleBarcode: generateBarcode(product, exampleBatch, "00001"),
+    cartonRangeStart: "00001",
+    cartonRangeEnd: "99999",
+    dataOrigin: product.dataOrigin,
+    archived: product.archived,
+  };
+}
+
 function emptyState(): AppState {
   return {
     settings: { mode: "development", supabaseProjectRef: "yagdnrnfqbqcqgcbejuc" },
@@ -231,6 +303,7 @@ function emptyState(): AppState {
     mismatches: [],
     audit: [],
     registry: [],
+    barcodePatterns: [],
   };
 }
 function can(user: User, action: "manage" | "sensitive" | "scan" | "view") {
@@ -337,6 +410,9 @@ export default function Home() {
   const [session, setSession] = useState<ScanSession | null>(null);
   const [search, setSearch] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([]);
+  const [importStep, setImportStep] = useState<"Upload" | "Preview" | "Validate" | "Import" | "Summary">("Upload");
+  const [importSummary, setImportSummary] = useState("");
   const [cameraOn, setCameraOn] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<"checking" | "connected" | "missing" | "error">(() =>
     process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? "checking" : "missing",
@@ -354,7 +430,7 @@ export default function Home() {
       })
       .then((data) => {
         if (cancelled) return;
-        const next = { ...data, registry: data.cartons };
+        const next = { ...data, registry: data.cartons, barcodePatterns: data.barcodePatterns ?? [] };
         setState(next);
         setActiveUserId("");
         setBackendStatus("ready");
@@ -399,13 +475,6 @@ export default function Home() {
   const transitWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "transit")?.id ?? "transit", [state.warehouses]);
   const primaryWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse")?.id ?? user?.warehouseId ?? "delhi", [state.warehouses, user?.warehouseId]);
   const transferWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse" && item.id !== primaryWarehouseId)?.id ?? primaryWarehouseId, [primaryWarehouseId, state.warehouses]);
-  const resolveWarehouseId = useCallback(
-    (value: string) => {
-      const normalized = value.trim().toLowerCase();
-      return state.warehouses.find((item) => item.id.toLowerCase() === normalized || item.name.toLowerCase() === normalized)?.id ?? factoryWarehouseId;
-    },
-    [factoryWarehouseId, state.warehouses],
-  );
   const productById = useMemo(() => Object.fromEntries(state.products.map((item) => [item.id, item])), [state.products]);
   const operationalProducts = useMemo(() => state.products.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.products, state.settings.mode]);
   const operationalCartons = useMemo(() => state.cartons.filter((item) => isOperationalRecord(item, state.settings.mode)), [state.cartons, state.settings.mode]);
@@ -457,7 +526,7 @@ export default function Home() {
     fetch("/api/wms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...next, registry: next.cartons }),
+      body: JSON.stringify({ ...next, registry: next.cartons, barcodePatterns: next.barcodePatterns ?? [] }),
     })
       .then(async (response) => {
         if (!response.ok) throw new Error((await response.json()).error ?? "Supabase save failed.");
@@ -475,6 +544,7 @@ export default function Home() {
       const draft: AppState = JSON.parse(JSON.stringify(current));
       updater(draft);
       draft.registry = draft.cartons;
+      draft.barcodePatterns = draft.barcodePatterns ?? [];
       persistState(draft);
       return draft;
     });
@@ -542,8 +612,52 @@ export default function Home() {
 
   function handleScan(raw: string) {
     if (!session || !user) return;
-    const barcode = raw.trim();
+    const barcode = normalizeBarcode(raw);
     if (!barcode) return;
+    const existingCarton = operationalCartons.find((item) => item.barcode === barcode);
+    if (!existingCarton) {
+      const parsed = parseTemplateBarcode(barcode, operationalProducts);
+      if (parsed?.product && session.type === "Factory Dispatch") {
+        const duplicateDraft = operationalSessions.find((item) => !item.finalized && item.id !== session.id && item.scanned.includes(barcode));
+        if (duplicateDraft || session.scanned.includes(barcode)) {
+          setScanMessage({ type: "error", text: "Duplicate scan blocked." });
+          setScanInput("");
+          return;
+        }
+        const product = parsed.product as Product;
+        const generatedAt = new Date();
+        const mfd = generatedAt.toISOString().slice(0, 10);
+        const expiryDate = new Date(generatedAt);
+        expiryDate.setDate(expiryDate.getDate() + product.shelfLifeDays);
+        const lazyCarton: Carton = {
+          id: uid("carton"),
+          barcode,
+          productId: product.id,
+          sku: product.sku,
+          gtin: product.gtin,
+          flavour: product.flavour,
+          weight: product.weight,
+          mrp: product.mrp,
+          qty: product.caseQty,
+          qtyUnit: product.qtyUnit,
+          batch: String(parsed.batch),
+          mfd,
+          expiry: expiryDate.toISOString().slice(0, 10),
+          cartonNo: String(parsed.cartonNo),
+          warehouseId: factoryWarehouseId,
+          status: "IN_FACTORY",
+          dataOrigin: product.dataOrigin ?? "real",
+        };
+        mutate((draft) => {
+          if (!draft.cartons.some((item) => item.barcode === barcode)) draft.cartons.push(lazyCarton);
+        });
+        setSession({ ...session, scanned: [barcode, ...session.scanned], updatedAt: now(), dataOrigin: lazyCarton.dataOrigin });
+        setScanMessage({ type: "ok", text: `${lazyCarton.sku} carton ${lazyCarton.cartonNo} created lazily and accepted.` });
+        setScanInput("");
+        window.navigator.vibrate?.(35);
+        return;
+      }
+    }
     const result = validateScan(barcode, session);
     setScanMessage({ type: result.ok ? "ok" : "error", text: result.message });
     if (!result.ok) {
@@ -779,48 +893,106 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  async function importExcel(file: File) {
+  function parseSkuMasterRow(row: Record<string, string | number>, rowNumber: number, seenSkus: Set<string>): ImportPreviewRow {
+    const get = (...keys: string[]) => {
+      const entries = Object.entries(row);
+      for (const key of keys) {
+        const found = entries.find(([header]) => header.trim().toLowerCase() === key.toLowerCase());
+        if (found) return String(found[1] ?? "").trim();
+      }
+      return "";
+    };
+    const prefix = get("PREFIX", "prefix");
+    const gtin = get("GTIN (14)", "GTIN", "gtin");
+    const batch = get("INTERNAL CODE", "batch", "BATCH");
+    const weight = get("WEIGHT", "weight");
+    const qtyRaw = get("QTY", "quantity", "case_qty");
+    const mrpRaw = get("MRP", "mrp");
+    const variant = get("VARIANT", "variant", "variant_code") || "NA";
+    const name = get("PRODUCT NAME", "product_name", "name") || "Mr Makhana";
+    const fullBarcode = normalizeBarcode(get("FULL BARCODE STRING", "barcode", "barcode_value"));
+    const qty = parseQuantityFormat(qtyRaw);
+    const mrp = Number(mrpRaw || 0);
+    const sku = buildSkuFromMaster(prefix, gtin, batch, weight, qty?.qty ?? 0, qty?.unit ?? "", mrp, variant);
+    const messages: string[] = [];
+    if (!prefix) messages.push("Missing PREFIX");
+    if (!/^\d{8,14}$/.test(gtin)) messages.push("Invalid GTIN");
+    if (!batch) messages.push("Missing INTERNAL CODE");
+    if (!weight) messages.push("Missing WEIGHT");
+    if (!qty) messages.push("Invalid QTY; expected pcs, pc, or p");
+    if (!Number.isFinite(mrp)) messages.push("Invalid MRP");
+    if (fullBarcode && !normalizeCartonNo(fullBarcode.slice(-5)) && !/X{5}$/i.test(fullBarcode)) messages.push("Example barcode must end with 00001-99999 or XXXXX");
+    const template = barcodeTemplate;
+    const product: Product = {
+      id: uid("product"),
+      name,
+      category: "Fox Nuts",
+      sku,
+      gtin,
+      prefix,
+      flavour: name,
+      weight,
+      mrp: Number.isFinite(mrp) ? mrp : 0,
+      caseQty: qty?.qty ?? 0,
+      qtyUnit: (qty?.unit ?? "pc") as Product["qtyUnit"],
+      variantCode: variant,
+      shelfLifeDays: 180,
+      status: "Active",
+      template,
+      dataOrigin: "real",
+    };
+    const exampleBatch = batch.replace(/[^A-Za-z0-9]/g, "") || "BATCH1";
+    const pattern = buildPattern(product, batch, exampleBatch);
+    const duplicateInFile = seenSkus.has(sku);
+    if (duplicateInFile) messages.push(`Duplicate SKU in file: ${sku}`);
+    seenSkus.add(sku);
+    const duplicateExisting = state.products.some((item) => item.sku === sku) || state.barcodePatterns.some((item) => item.sku === sku);
+    return {
+      rowNumber,
+      product,
+      pattern,
+      status: messages.length ? "error" : duplicateExisting ? "duplicate" : "valid",
+      messages: duplicateExisting ? [...messages, `Existing SKU/template will be updated: ${sku}`] : messages,
+    };
+  }
+
+  async function previewExcel(file: File) {
     if (!user || !can(user, "sensitive")) return;
     const rows = await readImportRows(file);
-    const errors: string[] = [];
-    const existing = new Set(state.cartons.map((carton) => carton.barcode));
-    const imported: Carton[] = [];
-    rows.forEach((row, index) => {
-      const barcode = String(row.barcode_value ?? row.barcode ?? "").trim();
-      const parsed = parseTemplateBarcode(barcode, state.products);
-      if (!barcode) errors.push(`Row ${index + 2}: missing barcode_value`);
-      else if (existing.has(barcode) || imported.some((carton) => carton.barcode === barcode)) errors.push(`Row ${index + 2}: duplicate barcode ${barcode}`);
-      else if (!parsed?.sku || !parsed.qty) errors.push(`Row ${index + 2}: invalid barcode/template`);
-      else {
-        imported.push({
-          id: uid("carton"),
-          barcode,
-          productId: parsed.productId!,
-          sku: String(row.sku ?? parsed.sku),
-          gtin: parsed.gtin!,
-          flavour: parsed.flavour!,
-          weight: parsed.weight!,
-          mrp: Number(row.mrp ?? parsed.mrp),
-          qty: Number(row.carton_quantity ?? parsed.qty),
-          qtyUnit: parsed.qtyUnit!,
-          batch: String(row.batch ?? parsed.batch),
-          mfd: String(row.mfd ?? new Date().toISOString().slice(0, 10)),
-          expiry: String(row.expiry ?? new Date(new Date().setDate(new Date().getDate() + 180)).toISOString().slice(0, 10)),
-          cartonNo: String(row.carton_number ?? parsed.cartonNo),
-          warehouseId: resolveWarehouseId(String(row.current_warehouse ?? factoryWarehouseId)),
-          status: "IN_FACTORY",
-          dataOrigin: "real",
-        });
-      }
-    });
+    const seenSkus = new Set<string>();
+    const preview = rows.map((row, index) => parseSkuMasterRow(row, index + 2, seenSkus));
+    const errors = preview.flatMap((item) => item.status === "error" ? item.messages.map((message) => `Row ${item.rowNumber}: ${message}`) : []);
+    setImportPreview(preview);
     setImportErrors(errors);
-    if (imported.length) {
-      mutate((draft) => {
-        draft.cartons.push(...imported);
-        draft.registry.push(...imported);
-      });
-      audit("Excel barcode registry import", { reason: `${imported.length} cartons imported, ${errors.length} rejected.` });
+    setImportSummary("");
+    setImportStep(errors.length ? "Validate" : "Preview");
+  }
+
+  function importSkuMaster() {
+    if (!user || !can(user, "sensitive")) return;
+    const importable = importPreview.filter((item) => item.status !== "error");
+    if (!importable.length) {
+      setImportSummary("No valid SKU templates to import.");
+      setImportStep("Summary");
+      return;
     }
+    mutate((draft) => {
+      importable.forEach(({ product, pattern }) => {
+        const existingProduct = draft.products.find((item) => item.sku === product.sku);
+        if (existingProduct) {
+          Object.assign(existingProduct, { ...product, id: existingProduct.id });
+          pattern.productId = existingProduct.id;
+        } else {
+          draft.products.unshift(product);
+        }
+        const existingPattern = draft.barcodePatterns.find((item) => item.sku === product.sku);
+        if (existingPattern) Object.assign(existingPattern, { ...pattern, id: existingPattern.id, productId: existingProduct?.id ?? product.id });
+        else draft.barcodePatterns.unshift(pattern);
+      });
+    });
+    setImportSummary(`${importable.length} SKU/barcode templates imported. 0 cartons created; inventory remains based only on actual carton records.`);
+    setImportStep("Summary");
+    audit("Excel SKU master import", { reason: `${importable.length} SKU templates imported, ${importErrors.length} rejected. No cartons created.` });
   }
 
   function addProduct(form: FormData) {
@@ -844,25 +1016,33 @@ export default function Home() {
       template: String(form.get("template") || barcodeTemplate),
       dataOrigin: "real",
     };
-    mutate((draft) => draft.products.unshift(product));
+    mutate((draft) => {
+      draft.products.unshift(product);
+      draft.barcodePatterns.unshift(buildPattern(product));
+    });
     audit("Product created", { newValue: product.sku });
   }
 
-  function generateBatch(productId: string, batch: string, count: number) {
+  function generateBatch(productId: string, batch: string, startNo: number, endNo: number) {
     if (!user || !can(user, "sensitive")) return;
     const product = state.products.find((item) => item.id === productId);
     if (!product) return;
-    const start = state.cartons.filter((carton) => carton.productId === productId && carton.batch === batch).length + 1;
+    const start = Math.max(minCartonNo, Math.floor(startNo));
+    const end = Math.min(maxCartonNo, Math.floor(endNo));
+    if (!batch.trim() || start > end) return;
     const generatedAt = new Date();
     const mfd = generatedAt.toISOString().slice(0, 10);
     const expiryDate = new Date(generatedAt);
     expiryDate.setDate(expiryDate.getDate() + product.shelfLifeDays);
     const expiry = expiryDate.toISOString().slice(0, 10);
-    const created = Array.from({ length: count }, (_, index) => {
+    const existing = new Set(state.cartons.map((carton) => carton.barcode));
+    const created = Array.from({ length: end - start + 1 }, (_, index) => {
       const cartonNo = String(start + index).padStart(5, "0");
+      const barcode = generateBarcode(product, batch, cartonNo);
+      if (existing.has(barcode)) return null;
       return {
         id: uid("carton"),
-        barcode: generateBarcode(product, batch, cartonNo),
+        barcode,
         productId: product.id,
         sku: product.sku,
         gtin: product.gtin,
@@ -879,7 +1059,8 @@ export default function Home() {
         status: "IN_FACTORY" as Status,
         dataOrigin: "real" as DataOrigin,
       };
-    });
+    }).filter(Boolean) as Carton[];
+    if (!created.length) return;
     mutate((draft) => {
       draft.cartons.push(...created);
       draft.registry.push(...created);
@@ -904,7 +1085,7 @@ export default function Home() {
         dataOrigin: "real",
       });
     });
-    audit("Production batch generated", { newValue: `${batch}: ${count} cartons`, reason: "Auto-generated padded carton numbers." });
+    audit("Production batch generated", { newValue: `${batch}: ${created.length} cartons`, reason: `Generated carton range ${String(start).padStart(5, "0")}-${String(end).padStart(5, "0")}.` });
   }
 
   function approveMismatch(id: string, reason: string) {
@@ -1374,24 +1555,75 @@ export default function Home() {
         ) : null}
 
         {view === "Products" ? (
-          <ProductsPanel products={operationalProducts} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
+          <ProductsPanel products={operationalProducts} cartons={operationalCartons} patterns={state.barcodePatterns} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
         ) : null}
 
         {view === "Import" ? (
-          <section className="grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
+          <section className="grid gap-5">
             <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-              <h2 className="text-lg font-bold">Excel barcode import</h2>
-              <p className="mt-2 text-sm text-slate-600">Columns accepted: barcode_value, sku, batch, mfd, expiry, mrp, carton_quantity, carton_number, current_warehouse.</p>
-              <input className="mt-4 w-full rounded-lg border border-slate-300 p-3" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && importExcel(event.target.files[0])} />
-              <Button className="mt-3 w-full" variant="secondary" onClick={() => exportCsv("import-errors", importErrors.map((error) => ({ error })))}>
-                <Download size={18} /> Download error report
-              </Button>
-            </div>
-            <div className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-              <h2 className="text-lg font-bold">Rejected records</h2>
-              <div className="mt-3 space-y-2">
-                {importErrors.length ? importErrors.map((error) => <div key={error} className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-800">{error}</div>) : <EmptyState text="No import errors in the latest file." />}
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold">Excel Import Wizard</h2>
+                  <p className="mt-2 text-sm text-slate-600">Imports Product Master, SKU Master, Barcode Template, and Barcode Pattern Registry. It never creates inventory cartons from theoretical ranges.</p>
+                </div>
+                <span className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold text-slate-700">{importStep}</span>
               </div>
+              <div className="mt-4 grid gap-2 md:grid-cols-5">
+                {(["Upload", "Preview", "Validate", "Import", "Summary"] as const).map((step) => (
+                  <div key={step} className={`rounded-lg border p-3 text-center text-sm font-bold ${step === importStep ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-500"}`}>{step}</div>
+                ))}
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
+                <input className="w-full rounded-lg border border-slate-300 p-3" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => event.target.files?.[0] && previewExcel(event.target.files[0])} />
+                <Button disabled={!importPreview.length || importErrors.length > 0} onClick={() => setImportStep("Import")}>Validate</Button>
+                <Button disabled={!importPreview.length || importErrors.length > 0} onClick={importSkuMaster}><Upload size={18} /> Import</Button>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <Stat label="Rows previewed" value={importPreview.length} />
+                <Stat label="Valid new" value={importPreview.filter((item) => item.status === "valid").length} tone="emerald" />
+                <Stat label="Duplicates update" value={importPreview.filter((item) => item.status === "duplicate").length} tone="amber" />
+                <Stat label="Errors" value={importPreview.filter((item) => item.status === "error").length} tone={importErrors.length ? "rose" : "slate"} />
+              </div>
+              {importSummary ? <div className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{importSummary}</div> : null}
+            </div>
+            <div className="grid gap-5 xl:grid-cols-[1.4fr_0.6fr]">
+              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                <h2 className="text-lg font-bold">Preview and validation</h2>
+                <div className="mt-4 overflow-auto">
+                  <table className="w-full min-w-[960px] border-collapse text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50">
+                        {["Row", "Status", "SKU", "Pattern", "Range", "Actual cartons", "Message"].map((header) => <th key={header} className="p-3 font-bold text-slate-600">{header}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importPreview.slice(0, 80).map((item) => (
+                        <tr key={`${item.rowNumber}-${item.product.sku}`} className="border-b border-slate-100">
+                          <td className="p-3">{item.rowNumber}</td>
+                          <td className="p-3 font-bold">{item.status}</td>
+                          <td className="p-3 font-mono text-xs">{item.product.sku}</td>
+                          <td className="max-w-[320px] truncate p-3 font-mono text-xs">{item.pattern.exampleBarcode.replace("BATCH1", item.pattern.batchPattern)}</td>
+                          <td className="p-3">{item.pattern.cartonRangeStart}-{item.pattern.cartonRangeEnd}</td>
+                          <td className="p-3">0 imported</td>
+                          <td className="max-w-[320px] truncate p-3">{item.messages.join("; ") || "Ready"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!importPreview.length ? <EmptyState text="Upload an Excel or CSV file to preview SKU templates." /> : null}
+                </div>
+              </section>
+              <section className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-lg font-bold">Error report</h2>
+                  <Button variant="secondary" onClick={() => exportCsv("sku-master-import-errors", importErrors.map((error) => ({ error })))}>
+                    <Download size={18} /> CSV
+                  </Button>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {importErrors.length ? importErrors.map((error) => <div key={error} className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-800">{error}</div>) : <EmptyState text="No blocking validation errors." />}
+                </div>
+              </section>
             </div>
           </section>
         ) : null}
@@ -1724,10 +1956,23 @@ function DocumentCard({ doc, onReprint }: { doc: DocumentRecord; onReprint: (doc
   );
 }
 
-function ProductsPanel({ products, onAddProduct, onGenerateBatch }: { products: Product[]; onAddProduct: (form: FormData) => void; onGenerateBatch: (productId: string, batch: string, count: number) => void }) {
+function ProductsPanel({
+  products,
+  cartons,
+  patterns,
+  onAddProduct,
+  onGenerateBatch,
+}: {
+  products: Product[];
+  cartons: Carton[];
+  patterns: BarcodePattern[];
+  onAddProduct: (form: FormData) => void;
+  onGenerateBatch: (productId: string, batch: string, startNo: number, endNo: number) => void;
+}) {
   const [productId, setProductId] = useState(products[0]?.id ?? "");
   const [batch, setBatch] = useState("B2607A");
-  const [count, setCount] = useState(12);
+  const [startNo, setStartNo] = useState(1);
+  const [endNo, setEndNo] = useState(12);
   return (
     <section className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
       <form
@@ -1763,16 +2008,34 @@ function ProductsPanel({ products, onAddProduct, onGenerateBatch }: { products: 
         <div className="mt-4 grid gap-3">
           <SelectField label="Product" value={productId} onChange={(event) => setProductId(event.target.value)}>{products.map((item) => <option key={item.id} value={item.id}>{item.sku} / {item.flavour}</option>)}</SelectField>
           <TextField label="Batch" value={batch} onChange={(event) => setBatch(event.target.value)} />
-          <TextField label="Carton count" type="number" value={count} onChange={(event) => setCount(Number(event.target.value))} />
-          <Button onClick={() => onGenerateBatch(productId, batch, count)}><Printer size={18} /> Generate cartons and labels</Button>
+          <TextField label="Start carton no" type="number" min={minCartonNo} max={maxCartonNo} value={startNo} onChange={(event) => setStartNo(Number(event.target.value))} />
+          <TextField label="End carton no" type="number" min={minCartonNo} max={maxCartonNo} value={endNo} onChange={(event) => setEndNo(Number(event.target.value))} />
+          <Button onClick={() => onGenerateBatch(productId, batch, startNo, endNo)}><Printer size={18} /> Generate carton range and labels</Button>
         </div>
         <div className="mt-5 space-y-2">
-          {products.map((product) => (
-            <div key={product.id} className="rounded-lg border border-slate-200 p-3">
-              <div className="font-bold">{product.sku}</div>
-              <div className="text-sm text-slate-500">{product.flavour} / {product.caseQty}{product.qtyUnit} / MRP {product.mrp}</div>
-            </div>
-          ))}
+          {products.map((product) => {
+            const productCartons = cartons.filter((carton) => carton.productId === product.id);
+            const currentInventory = productCartons.filter((carton) => ["IN_FACTORY", "RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(carton.status)).length;
+            const inTransit = productCartons.filter((carton) => carton.status.includes("IN_TRANSIT")).length;
+            const dispatched = productCartons.filter((carton) => ["DISPATCHED_TO_CUSTOMER", "DELIVERED"].includes(carton.status)).length;
+            const damagedLost = productCartons.filter((carton) => ["DAMAGED", "LOST"].includes(carton.status)).length;
+            const pattern = patterns.find((item) => item.sku === product.sku);
+            return (
+              <div key={product.id} className="rounded-lg border border-slate-200 p-3">
+                <div className="font-bold">{product.sku}</div>
+                <div className="text-sm text-slate-500">{product.flavour} / {product.caseQty}{product.qtyUnit} / MRP {product.mrp}</div>
+                <div className="mt-2 font-mono text-xs text-slate-500">{pattern?.exampleBarcode ?? generateBarcode(product, "BATCH1", "00001")}</div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <Stat label="Valid range" value="00001-99999" />
+                  <Stat label="Actual cartons" value={productCartons.length} tone="emerald" />
+                  <Stat label="Current inventory" value={currentInventory} />
+                  <Stat label="In transit" value={inTransit} tone="amber" />
+                  <Stat label="Dispatched" value={dispatched} />
+                  <Stat label="Damaged/Lost" value={damagedLost} tone={damagedLost ? "rose" : "slate"} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
     </section>

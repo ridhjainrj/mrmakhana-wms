@@ -4,6 +4,11 @@ import {
   barcodeTemplate,
   buildBarcodeFromTemplate,
   canRole,
+  maxCartonNo,
+  minCartonNo,
+  normalizeBarcode,
+  normalizeCartonNo,
+  parseQuantityFormat,
   parseTemplateBarcode,
   validateFinalizeRule,
   validateScanRule,
@@ -76,6 +81,36 @@ test("barcode template generation and quantity parsing support pcs pc p", () => 
     assert.equal(parsed?.qtyUnit, qtyUnit);
     assert.equal(parsed?.cartonNo, "00009");
   }
+});
+
+test("quantity formats and carton range are normalized without creating stock", () => {
+  assert.deepEqual(parseQuantityFormat("48p"), { qty: 48, unit: "p" });
+  assert.deepEqual(parseQuantityFormat("48 pc"), { qty: 48, unit: "pc" });
+  assert.deepEqual(parseQuantityFormat("48pcs"), { qty: 48, unit: "pcs" });
+  assert.equal(normalizeCartonNo(minCartonNo), "00001");
+  assert.equal(normalizeCartonNo(maxCartonNo), "99999");
+  assert.equal(normalizeCartonNo("00000"), null);
+  assert.equal(normalizeCartonNo("100000"), null);
+});
+
+test("template parser supports five character batch codes and whitespace example strings", () => {
+  const excelProduct: WmsProduct = {
+    ...product,
+    id: "lc",
+    sku: "LC-65067-G2627-55G-48P-150-S",
+    gtin: "8906160650678",
+    prefix: "LC",
+    weight: "55g",
+    caseQty: 48,
+    qtyUnit: "p",
+    mrp: 150,
+    variantCode: "S",
+  };
+  const parsed = parseTemplateBarcode("LC 8906160650678 G2627 55g 48p 150 S 00001", [excelProduct]);
+  assert.equal(parsed?.barcode, normalizeBarcode("LC 8906160650678 G2627 55g 48p 150 S 00001"));
+  assert.equal(parsed?.batch, "G2627");
+  assert.equal(parsed?.cartonNo, "00001");
+  assert.equal(parsed?.qty, 48);
 });
 
 test("duplicate scans in the same session are blocked", () => {

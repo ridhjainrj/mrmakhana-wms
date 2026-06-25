@@ -46,7 +46,7 @@ create table public.products (
   flavour text not null,
   category text not null,
   sku text not null unique,
-  gtin text not null unique,
+  gtin text not null,
   prefix text not null,
   weight text not null,
   mrp numeric(10,2) not null,
@@ -60,6 +60,27 @@ create table public.products (
   data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
   archived boolean not null default false,
   created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table public.barcode_patterns (
+  id text primary key,
+  product_id uuid not null references public.products(id) on delete cascade,
+  sku text not null unique,
+  prefix text not null,
+  gtin text not null,
+  batch_pattern text not null,
+  weight text not null,
+  case_qty integer not null check (case_qty > 0),
+  qty_unit text not null check (qty_unit in ('pcs', 'pc', 'p')),
+  mrp numeric(10,2) not null,
+  variant_code text not null,
+  barcode_template text not null,
+  example_barcode text not null,
+  carton_range_start text not null default '00001',
+  carton_range_end text not null default '99999',
+  data_origin text not null default 'real' check (data_origin in ('demo', 'real', 'system')),
+  archived boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -200,6 +221,7 @@ alter table public.warehouses enable row level security;
 alter table public.system_settings enable row level security;
 alter table public.profiles enable row level security;
 alter table public.products enable row level security;
+alter table public.barcode_patterns enable row level security;
 alter table public.cartons enable row level security;
 alter table public.scan_sessions enable row level security;
 alter table public.documents enable row level security;
@@ -217,6 +239,9 @@ create policy "admin manages profiles" on public.profiles for all to authenticat
 
 create policy "read products" on public.products for select to authenticated using (true);
 create policy "admin accountant write products" on public.products for all to authenticated using (public.is_admin_or_accountant()) with check (public.is_admin_or_accountant());
+
+create policy "read barcode patterns" on public.barcode_patterns for select to authenticated using (true);
+create policy "admin accountant write barcode patterns" on public.barcode_patterns for all to authenticated using (public.is_admin_or_accountant()) with check (public.is_admin_or_accountant());
 
 create policy "read allowed cartons" on public.cartons for select to authenticated using (
   public.current_role() in ('Admin', 'Accountant')

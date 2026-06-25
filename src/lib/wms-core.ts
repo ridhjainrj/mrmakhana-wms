@@ -32,6 +32,10 @@ export type WmsProduct = {
   template: string;
 };
 
+export type ParsedTemplateBarcode = Partial<WmsCarton> & {
+  product: WmsProduct;
+};
+
 export type WmsCarton = {
   barcode: string;
   productId: string;
@@ -68,6 +72,32 @@ export const lockedStatuses: WmsStatus[] = ["DAMAGED", "LOST", "BLOCKED", "EXPIR
 export const sensitiveRoles: WmsRole[] = ["Admin", "Accountant"];
 export const managerRoles: WmsRole[] = ["Admin", "Accountant", "Warehouse Manager"];
 export const barcodeTemplate = "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}";
+export const minCartonNo = 1;
+export const maxCartonNo = 99999;
+
+export function normalizeBarcode(value: string) {
+  return value.replace(/\s+/g, "").trim();
+}
+
+export function normalizeQtyUnit(value: string) {
+  const unit = value.trim().toLowerCase();
+  return unit === "pcs" || unit === "pc" || unit === "p" ? unit : null;
+}
+
+export function parseQuantityFormat(value: string | number) {
+  const match = String(value).trim().match(/^(\d+)\s*(pcs|pc|p)$/i);
+  if (!match) return null;
+  const unit = normalizeQtyUnit(match[2]);
+  return unit ? { qty: Number(match[1]), unit } : null;
+}
+
+export function normalizeCartonNo(value: string | number) {
+  const raw = String(value).trim();
+  const cartonNo = /^\d+$/.test(raw) ? raw.padStart(5, "0") : raw;
+  if (!/^\d{5}$/.test(cartonNo)) return null;
+  const numeric = Number(cartonNo);
+  return numeric >= minCartonNo && numeric <= maxCartonNo ? cartonNo : null;
+}
 
 export function daysFrom(date: string, baseDate = new Date()) {
   return Math.ceil((new Date(date).getTime() - baseDate.getTime()) / 86400000);
@@ -93,17 +123,72 @@ export function buildBarcodeFromTemplate(product: WmsProduct, batch: string, car
     VARIANT: product.variantCode,
     CARTON_NO: cartonNo,
   };
-  return (product.template || barcodeTemplate).replace(/\{([A-Z_]+)\}/g, (_, key: string) => values[key] ?? "");
+  return normalizeBarcode((product.template || barcodeTemplate).replace(/\{([A-Z_]+)\}/g, (_, key: string) => values[key] ?? ""));
 }
 
-export function parseTemplateBarcode(barcode: string, products: WmsProduct[]): Partial<WmsCarton> | null {
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function templateRegex(product: WmsProduct) {
+  const values: Record<string, string> = {
+    PREFIX: product.prefix,
+    GTIN: product.gtin,
+    WEIGHT: product.weight,
+    QTY: String(product.caseQty),
+    QTY_UNIT: product.qtyUnit,
+    MRP: String(product.mrp),
+    VARIANT: product.variantCode,
+  };
+  const regex = normalizeBarcode(product.template || barcodeTemplate).replace(/\{([A-Z_]+)\}/g, (_, key: string) => {
+    if (key === "BATCH") return "(?<batch>[A-Za-z0-9]+?)";
+    if (key === "CARTON_NO") return "(?<cartonNo>\\d{5})";
+    return escapeRegex(normalizeBarcode(values[key] ?? ""));
+  });
+  return new RegExp(`^${regex}$`, "i");
+}
+
+export function parseTemplateBarcode(rawBarcode: string, products: WmsProduct[]): ParsedTemplateBarcode | null {
+  const barcode = normalizeBarcode(rawBarcode);
+  for (const product of products) {
+    const match = barcode.match(templateRegex(product));
+    const cartonNo = normalizeCartonNo(match?.groups?.cartonNo ?? "");
+    if (!match?.groups?.batch || !cartonNo) continue;
+    const qty = parseQuantityFormat(`${product.caseQty}${product.qtyUnit}`);
+    if (!qty) continue;
+    return {
+      product,
+      barcode,
+      productId: product.id,
+      sku: product.sku,
+      gtin: product.gtin,
+      flavour: product.flavour,
+      weight: product.weight,
+      mrp: product.mrp,
+      qty: qty.qty,
+      qtyUnit: qty.unit,
+      batch: match.groups.batch,
+      cartonNo,
+      status: "IN_FACTORY",
+      warehouseId: "factory",
+    };
+  }
+  return null;
+}
+
+export function parseLegacyTemplateBarcode(rawBarcode: string, products: WmsProduct[]): ParsedTemplateBarcode | null {
+  const barcode = normalizeBarcode(rawBarcode);
   const qtyMatch = barcode.match(/(\d+)(pcs|pc|p)/i);
-  const product = products.find((item) => barcode.startsWith(item.prefix + item.gtin));
-  if (!product || !qtyMatch) return null;
-  const cartonNo = barcode.slice(-5);
+  const product = products.find((item) => barcode.toLowerCase().startsWith(normalizeBarcode(item.prefix + item.gtin).toLowerCase()));
+  const cartonNo = normalizeCartonNo(barcode.slice(-5));
+  if (!product || !qtyMatch || !cartonNo) return null;
+  const qty = parseQuantityFormat(`${qtyMatch[1]}${qtyMatch[2]}`);
+  if (!qty) return null;
   const batchStart = product.prefix.length + product.gtin.length;
-  const batch = barcode.slice(batchStart, batchStart + 6);
+  const batchEnd = barcode.toLowerCase().indexOf(normalizeBarcode(product.weight).toLowerCase(), batchStart);
+  const batch = batchEnd > batchStart ? barcode.slice(batchStart, batchEnd) : barcode.slice(batchStart, batchStart + 6);
   return {
+    product,
     barcode,
     productId: product.id,
     sku: product.sku,
@@ -111,8 +196,8 @@ export function parseTemplateBarcode(barcode: string, products: WmsProduct[]): P
     flavour: product.flavour,
     weight: product.weight,
     mrp: product.mrp,
-    qty: Number(qtyMatch[1]),
-    qtyUnit: qtyMatch[2].toLowerCase(),
+    qty: qty.qty,
+    qtyUnit: qty.unit,
     batch,
     cartonNo,
     status: "IN_FACTORY",
