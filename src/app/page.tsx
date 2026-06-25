@@ -206,7 +206,6 @@ type AppState = {
   registry: Carton[];
 };
 
-const sessionUserKey = "mrmakhana-wms-user";
 function now() {
   return new Date().toISOString();
 }
@@ -327,7 +326,6 @@ function SelectField(props: React.SelectHTMLAttributes<HTMLSelectElement> & { la
 export default function Home() {
   const [state, setState] = useState<AppState>(() => emptyState());
   const [activeUserId, setActiveUserId] = useState("");
-  const [hydrated, setHydrated] = useState(false);
   const [backendStatus, setBackendStatus] = useState<"loading" | "ready" | "saving" | "error">("loading");
   const [backendMessage, setBackendMessage] = useState("Loading WMS data from Supabase...");
   const [email, setEmail] = useState("admin@mrmakhana.test");
@@ -357,32 +355,20 @@ export default function Home() {
       .then((data) => {
         if (cancelled) return;
         const next = { ...data, registry: data.cartons };
-        const storedUserId = window.localStorage.getItem(sessionUserKey) ?? "";
         setState(next);
-        setActiveUserId(next.users.some((item) => item.id === storedUserId) ? storedUserId : "");
+        setActiveUserId("");
         setBackendStatus("ready");
         setBackendMessage("Supabase data loaded.");
-        setHydrated(true);
       })
       .catch((error) => {
         if (cancelled) return;
         setBackendStatus("error");
         setBackendMessage(error instanceof Error ? error.message : "Unable to load Supabase WMS data.");
-        setHydrated(true);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    if (activeUserId) {
-      window.localStorage.setItem(sessionUserKey, activeUserId);
-      return;
-    }
-    window.localStorage.removeItem(sessionUserKey);
-  }, [activeUserId, hydrated]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -520,9 +506,9 @@ export default function Home() {
   }
 
   function logout() {
-    window.localStorage.removeItem(sessionUserKey);
     setActiveUserId("");
     setSession(null);
+    setView("Dashboard");
   }
 
   function startSession(type: ScanSession["type"]) {
