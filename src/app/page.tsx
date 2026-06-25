@@ -2956,6 +2956,12 @@ function OperationalScanWorkspace({
             <QrCode size={42} />
             <h2>Select a workflow to begin scanning</h2>
             <p>Every movement remains a draft until finalized. Page refreshes keep finalized operational data in Supabase.</p>
+            <div className="ops-mobile-start">
+              <button className="ops-flow-button ops-flow-button--orange" onClick={() => onStart("Factory Dispatch")} disabled={!canScan}><Truck size={22} /> Factory Dispatch</button>
+              <button className="ops-flow-button ops-flow-button--green" onClick={() => onStart("Warehouse Receive")} disabled={!canScan}><PackageCheck size={22} /> Warehouse Receive</button>
+              <button className="ops-flow-button ops-flow-button--blue" onClick={() => onStart("Transfer Out")} disabled={!canScan}><ArrowRightLeft size={22} /> Transfer Out</button>
+              <button className="ops-flow-button ops-flow-button--purple" onClick={() => onStart("Customer Dispatch")} disabled={!canScan}><Send size={22} /> Customer Dispatch</button>
+            </div>
           </div>
         )}
       </div>
