@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import Image from "next/image";
 import {
   AlertTriangle,
@@ -222,6 +222,21 @@ type MismatchCase = {
   reason?: string;
   dataOrigin?: DataOrigin;
   archived?: boolean;
+};
+
+type InventoryAggregateRow = {
+  key: string;
+  product: string;
+  sku: string;
+  gtin: string;
+  batch: string;
+  warehouse: string;
+  cartons: number;
+  unitsPerCarton: number;
+  totalUnits: number;
+  status: Status;
+  lastMovement: string;
+  sampleBarcode: string;
 };
 
 type PermissionAction = "view" | "create" | "edit" | "archive" | "delete" | "approve" | "export" | "import";
@@ -512,6 +527,14 @@ export default function Home() {
   const [scanMessage, setScanMessage] = useState<{ type: "ok" | "error"; text: string } | null>(null);
   const [session, setSession] = useState<ScanSession | null>(null);
   const [search, setSearch] = useState("");
+  const [inventoryQuery, setInventoryQuery] = useState("");
+  const [inventoryWarehouse, setInventoryWarehouse] = useState("");
+  const [inventoryBatch, setInventoryBatch] = useState("");
+  const [inventoryStatus, setInventoryStatus] = useState("");
+  const [inventoryProduct, setInventoryProduct] = useState("");
+  const [inventoryExpiry, setInventoryExpiry] = useState("");
+  const [selectedCartonBarcode, setSelectedCartonBarcode] = useState("");
+  const [scanFullscreen, setScanFullscreen] = useState(false);
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([]);
   const [importStep, setImportStep] = useState<"Upload" | "Preview" | "Validate" | "Import" | "Summary">("Upload");
@@ -713,6 +736,26 @@ export default function Home() {
     return validateScanRule(barcode, activeSession, operationalCartons, operationalProducts);
   }
 
+  function playScanTone(type: "ok" | "error") {
+    if (!state.managementConfig.settings.scannerSounds || typeof window === "undefined") return;
+    const AudioCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) return;
+    try {
+      const audio = new AudioCtor();
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      oscillator.frequency.value = type === "ok" ? 880 : 220;
+      gain.gain.value = 0.04;
+      oscillator.connect(gain);
+      gain.connect(audio.destination);
+      oscillator.start();
+      oscillator.stop(audio.currentTime + 0.08);
+      window.setTimeout(() => audio.close().catch(() => undefined), 140);
+    } catch {
+      // Audio feedback is optional; scans must never fail because sound is blocked.
+    }
+  }
+
   function handleScan(raw: string) {
     if (!session || !user) return;
     const barcode = normalizeBarcode(raw);
@@ -725,6 +768,7 @@ export default function Home() {
         if (duplicateDraft || session.scanned.includes(barcode)) {
           setScanMessage({ type: "error", text: "Duplicate scan blocked." });
           setScanInput("");
+          playScanTone("error");
           return;
         }
         const product = parsed.product as Product;
@@ -757,6 +801,7 @@ export default function Home() {
         setSession({ ...session, scanned: [barcode, ...session.scanned], updatedAt: now(), dataOrigin: lazyCarton.dataOrigin });
         setScanMessage({ type: "ok", text: `${lazyCarton.sku} carton ${lazyCarton.cartonNo} created lazily and accepted.` });
         setScanInput("");
+        playScanTone("ok");
         window.navigator.vibrate?.(35);
         return;
       }
@@ -765,10 +810,12 @@ export default function Home() {
     setScanMessage({ type: result.ok ? "ok" : "error", text: result.message });
     if (!result.ok) {
       setScanInput("");
+      playScanTone("error");
       return;
     }
     setSession({ ...session, scanned: [barcode, ...session.scanned], updatedAt: now() });
     setScanInput("");
+    playScanTone("ok");
     window.navigator.vibrate?.(35);
   }
 
@@ -1562,8 +1609,56 @@ export default function Home() {
     if (user.role === "Admin" || user.role === "Accountant") return true;
     return carton.warehouseId === user.warehouseId || carton.status.includes("IN_TRANSIT");
   });
+  const selectedCarton = visibleCartons.find((carton) => carton.barcode === selectedCartonBarcode);
+  const inventoryBatches = Array.from(new Set(visibleCartons.map((carton) => carton.batch))).sort();
+  const inventoryStatuses = Array.from(new Set(visibleCartons.map((carton) => carton.status))).sort();
+  const inventoryProducts = Array.from(new Set(visibleCartons.map((carton) => carton.sku))).sort();
+  const inventoryFilteredCartons = visibleCartons.filter((carton) => {
+    const product = productById[carton.productId];
+    const haystack = [carton.barcode, carton.sku, carton.gtin, carton.flavour, carton.batch, product?.name].join(" ").toLowerCase();
+    const daysToExpiry = daysFrom(carton.expiry);
+    if (inventoryQuery && !haystack.includes(inventoryQuery.toLowerCase())) return false;
+    if (inventoryWarehouse && carton.warehouseId !== inventoryWarehouse) return false;
+    if (inventoryBatch && carton.batch !== inventoryBatch) return false;
+    if (inventoryStatus && carton.status !== inventoryStatus) return false;
+    if (inventoryProduct && carton.sku !== inventoryProduct) return false;
+    if (inventoryExpiry === "near" && !(daysToExpiry >= 0 && daysToExpiry <= 45)) return false;
+    if (inventoryExpiry === "expired" && daysToExpiry >= 0) return false;
+    return true;
+  });
+  const inventoryRows = Array.from(
+    inventoryFilteredCartons
+      .reduce((map, carton) => {
+        const key = [carton.productId, carton.sku, carton.gtin, carton.batch, carton.warehouseId, carton.status].join("|");
+        const existing = map.get(key);
+        if (existing) {
+          existing.cartons += 1;
+          existing.totalUnits += carton.qty;
+          if (carton.mfd > existing.lastMovement) existing.lastMovement = carton.mfd;
+          existing.sampleBarcode = existing.sampleBarcode || carton.barcode;
+        } else {
+          map.set(key, {
+            key,
+            product: productById[carton.productId]?.name ?? carton.flavour,
+            sku: carton.sku,
+            gtin: carton.gtin,
+            batch: carton.batch,
+            warehouse: warehouseById[carton.warehouseId] ?? carton.warehouseId,
+            cartons: 1,
+            unitsPerCarton: carton.qty,
+            totalUnits: carton.qty,
+            status: carton.status,
+            lastMovement: carton.mfd,
+            sampleBarcode: carton.barcode,
+          });
+        }
+        return map;
+      }, new Map<string, InventoryAggregateRow>())
+      .values(),
+  );
   const todayKey = new Date().toISOString().slice(0, 10);
   const todaysDispatches = operationalDocuments.filter((doc) => doc.type.includes("Dispatch") && doc.createdAt.slice(0, 10) === todayKey).length;
+  const pendingReceiptCartons = sourceSessions.receiving.reduce((sum, item) => sum + item.scanned.length, 0) + sourceSessions.transferIn.reduce((sum, item) => sum + item.scanned.length, 0);
   const factoryCartons = visibleCartons.filter((carton) => carton.warehouseId === factoryWarehouseId || carton.status === "IN_FACTORY");
   const warehouseCartons = visibleCartons.filter((carton) => state.warehouses.find((warehouse) => warehouse.id === carton.warehouseId)?.type === "warehouse");
   const customerDispatches = operationalDocuments.filter((doc) => doc.type.includes("Customer"));
@@ -1757,166 +1852,141 @@ export default function Home() {
         ) : null}
 
         {view === "Dispatches" ? (
-          <section className="ds-screen">
-            <div className="os-kpi-grid">
-              <Stat label="Factory dispatches" value={dispatchDocuments.filter((doc) => doc.type.includes("Factory")).length} tone="brand" />
-              <Stat label="Customer dispatches" value={customerDispatches.length} tone="accent" />
-              <Stat label="In transit cartons" value={metrics.inTransit} tone="warning" />
-              <Stat label="Dispatch documents" value={dispatchDocuments.length} />
-            </div>
-            <Card title="Dispatch Workbench" action={<Button onClick={() => startSession("Factory Dispatch")}><Truck size={18} /> Start dispatch</Button>}>
-              <div className="ds-doc-grid">
-                {dispatchDocuments.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
-                {!dispatchDocuments.length ? <EmptyState text="No dispatch documents yet." /> : null}
-              </div>
-            </Card>
-          </section>
+          <WorkflowLanding
+            tone="orange"
+            title="Factory Dispatch"
+            subtitle="Select source, destination, batch/SKU, then scan cartons into a packing list."
+            icon={<Truck size={26} />}
+            stats={[
+              ["Factory dispatches", dispatchDocuments.filter((doc) => doc.type.includes("Factory")).length],
+              ["In transit", metrics.inTransit],
+              ["Dispatch slips", dispatchDocuments.length],
+              ["Draft scans", operationalSessions.filter((item) => !item.finalized && item.type === "Factory Dispatch").length],
+            ]}
+            steps={["Select source factory/warehouse", "Select destination warehouse", "Select batch/SKU", "Scan cartons", "Review packing list", "Finalize dispatch slip"]}
+            primaryLabel="Start factory dispatch"
+            onPrimary={() => startSession("Factory Dispatch")}
+            documents={dispatchDocuments}
+            onReprint={(doc) => reprintDocument(doc, "Workflow document download")}
+          />
         ) : null}
 
         {view === "Inventory" ? (
-          <section className="ds-screen">
-            <div className="os-kpi-grid">
-              <Stat label="Available cartons" value={visibleCartons.filter((carton) => ["IN_FACTORY", "RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(carton.status)).length} tone="accent" />
-              <Stat label="In transit" value={metrics.inTransit} tone="brand" />
-              <Stat label="Damaged / lost" value={visibleCartons.filter((carton) => ["DAMAGED", "LOST"].includes(carton.status)).length} tone="danger" />
-              <Stat label="Near expiry" value={metrics.nearExpiry} tone="warning" />
-            </div>
-            <Card title="All Inventory" action={<Button variant="secondary" onClick={() => exportCsv("inventory-snapshot", visibleCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, batch: carton.batch, warehouse: warehouseById[carton.warehouseId], status: carton.status, expiry: carton.expiry })))}><Download size={18} /> Export</Button>} pad={false}>
-              <InventoryTable rows={visibleCartons} warehouseById={warehouseById} />
-            </Card>
-            <Card title="Damage / Write-off Queue">
-              <div className="grid gap-2 md:grid-cols-2">
-                {visibleCartons.filter((carton) => lockedStatuses.includes(carton.status)).slice(0, 12).map((carton) => (
-                  <CartonRow key={carton.id} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} canReverse={hasPermission(state, user, "Inventory", "approve")} onReverse={reverseCarton} />
-                ))}
-                {!visibleCartons.some((carton) => lockedStatuses.includes(carton.status)) ? <EmptyState text="No damaged, lost, blocked, expired, or reversed cartons." /> : null}
-              </div>
-            </Card>
-          </section>
+          <InventoryWorkbench
+            cartons={visibleCartons}
+            filteredCartons={inventoryFilteredCartons}
+            rows={inventoryRows}
+            warehouses={state.warehouses}
+            warehouseById={warehouseById}
+            productById={productById}
+            metrics={metrics}
+            pendingReceiptCartons={pendingReceiptCartons}
+            query={inventoryQuery}
+            onQuery={setInventoryQuery}
+            warehouseFilter={inventoryWarehouse}
+            onWarehouseFilter={setInventoryWarehouse}
+            batchFilter={inventoryBatch}
+            onBatchFilter={setInventoryBatch}
+            statusFilter={inventoryStatus}
+            onStatusFilter={setInventoryStatus}
+            productFilter={inventoryProduct}
+            onProductFilter={setInventoryProduct}
+            expiryFilter={inventoryExpiry}
+            onExpiryFilter={setInventoryExpiry}
+            batches={inventoryBatches}
+            statuses={inventoryStatuses}
+            products={inventoryProducts}
+            selectedCarton={selectedCarton}
+            documents={operationalDocuments}
+            audit={state.audit}
+            canReverse={hasPermission(state, user, "Inventory", "approve")}
+            onSelectCarton={setSelectedCartonBarcode}
+            onCloseDrawer={() => setSelectedCartonBarcode("")}
+            onScan={() => setView("Scan")}
+            onCreateBatch={() => setView("Products")}
+            onPrintLabels={() => setView("Documents")}
+            onExport={() => exportCsv("inventory-snapshot", inventoryFilteredCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, gtin: carton.gtin, batch: carton.batch, warehouse: warehouseById[carton.warehouseId], cartons: 1, units: carton.qty, status: carton.status, expiry: carton.expiry })))}
+            onReverse={reverseCarton}
+          />
         ) : null}
 
         {view === "Receiving" ? (
-          <section className="ds-screen">
-            <div className="os-action-grid">
-              <button className="os-action-card os-action-card--green" onClick={() => startSession("Warehouse Receive")}><PackageCheck size={26} /> Warehouse Receive</button>
-              <button className="os-action-card os-action-card--blue" onClick={() => startSession("Transfer In")}><ArrowRightLeft size={26} /> Transfer In</button>
-            </div>
-            <Card title="Receiving Documents">
-              <div className="ds-doc-grid">
-                {receivingDocuments.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
-                {!receivingDocuments.length ? <EmptyState text="No receiving slips yet." /> : null}
-              </div>
-            </Card>
-          </section>
+          <WorkflowLanding
+            tone="green"
+            title="Warehouse Receiving"
+            subtitle="Mirror dispatch: load an incoming dispatch, scan received cartons, compare expected versus received."
+            icon={<PackageCheck size={26} />}
+            stats={[
+              ["Expected incoming", pendingReceiptCartons],
+              ["Open dispatches", sourceSessions.receiving.length],
+              ["Mismatch cases", operationalMismatches.filter((item) => item.status !== "Closed").length],
+              ["Receiving slips", receivingDocuments.length],
+            ]}
+            steps={["Select incoming dispatch", "Show expected cartons", "Scan received cartons", "Compare expected vs received", "Finalize or create investigation"]}
+            primaryLabel="Receive dispatch"
+            secondaryLabel="Receive transfer"
+            onPrimary={() => startSession("Warehouse Receive")}
+            onSecondary={() => startSession("Transfer In")}
+            documents={receivingDocuments}
+            onReprint={(doc) => reprintDocument(doc, "Workflow document download")}
+          />
         ) : null}
 
         {view === "Shipments" ? (
-          <section className="ds-screen">
-            <div className="os-action-grid">
-              <button className="os-action-card os-action-card--purple" onClick={() => startSession("Customer Dispatch")}><Send size={26} /> Customer Dispatch</button>
-              <button className="os-action-card os-action-card--blue" onClick={() => setView("Documents")}><FileText size={26} /> Shipment Slips</button>
-            </div>
-            <Card title="Customer Shipments">
-              <div className="ds-doc-grid">
-                {customerDispatches.map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={reprintDocument} />)}
-                {!customerDispatches.length ? <EmptyState text="No customer shipment documents yet." /> : null}
-              </div>
-            </Card>
-          </section>
+          <WorkflowLanding
+            tone="purple"
+            title="Customer Dispatch"
+            subtitle="Customer-led outbound scanning with packing list, delivery challan, and dispatch slip generation."
+            icon={<Send size={26} />}
+            stats={[
+              ["Customer dispatches", customerDispatches.length],
+              ["Dispatched cartons", visibleCartons.filter((carton) => carton.status === "DISPATCHED_TO_CUSTOMER").length],
+              ["Customers served", new Set(operationalCartons.map((carton) => carton.customer).filter(Boolean)).size],
+              ["Delivery challans", operationalDocuments.filter((doc) => doc.type.includes("Challan")).length],
+            ]}
+            steps={["Select customer", "Select source warehouse", "Select batch/SKU", "Scan cartons", "Review packing list", "Generate challan and slip"]}
+            primaryLabel="Start customer dispatch"
+            secondaryLabel="View shipment slips"
+            onPrimary={() => startSession("Customer Dispatch")}
+            onSecondary={() => setView("Documents")}
+            documents={customerDispatches}
+            onReprint={(doc) => reprintDocument(doc, "Workflow document download")}
+          />
         ) : null}
 
         {view === "Scan" ? (
-          <section className="ds-scan-grid">
-            <Card brand>
-              <h2 className="mm-card__title">Scan workflow</h2>
-              <div className="os-scan-buttons mt-4">
-                <button className="os-action-card os-action-card--orange" onClick={() => startSession("Factory Dispatch")} disabled={!can(user, "scan")}><Truck size={28} /> Factory Dispatch</button>
-                <button className="os-action-card os-action-card--green" onClick={() => startSession("Warehouse Receive")} disabled={!can(user, "scan")}><PackageCheck size={28} /> Warehouse Receive</button>
-                <button className="os-action-card os-action-card--blue" onClick={() => startSession("Transfer Out")} disabled={!can(user, "scan")}><ArrowRightLeft size={28} /> Transfer</button>
-                <button className="os-action-card os-action-card--purple" onClick={() => startSession("Customer Dispatch")} disabled={!can(user, "scan")}><Send size={28} /> Customer Dispatch</button>
-              </div>
-              <div className="mt-5">
-                <h3 className="text-[11px] font-extrabold uppercase tracking-[0.05em] text-blue-200">Saved drafts</h3>
-                <div className="mt-2 space-y-2">
-                  {operationalSessions.filter((item) => !item.finalized).length ? operationalSessions.filter((item) => !item.finalized).map((item) => (
-                    <button key={item.id} onClick={() => resumeDraft(item.id)} className="w-full rounded-[10px] border border-white/10 bg-white/10 p-3 text-left text-blue-50 hover:bg-white/15">
-                      <div className="font-bold">{item.type}</div>
-                      <div className="text-xs text-blue-100">{item.scanned.length} scans / {new Date(item.updatedAt).toLocaleString()}</div>
-                    </button>
-                  )) : <EmptyState text="No saved scan drafts." />}
-                </div>
-              </div>
-            </Card>
-
-            <Card>
-              {session ? (
-                <>
-                  <div className="ds-scanner-viewport" />
-                  <div className="ds-scan-panel__head">
-                    <div>
-                      <h2 className="m-0 text-lg font-extrabold text-[var(--text-strong)]">{session.type}</h2>
-                      <p className="mt-1 text-sm text-[var(--text-muted)]">{warehouseById[session.sourceWarehouseId]} -&gt; {session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : session.customer ?? "Customer"}</p>
-                    </div>
-                    <StatusBadge tone="blue">{session.scanned.length} scanned</StatusBadge>
-                  </div>
-                  {session.type === "Warehouse Receive" || session.type === "Transfer In" ? (
-                    <div className="mt-4">
-                      <SelectField label="Source dispatch / transfer" value={session.sourceSessionId ?? ""} onChange={(event) => updateSourceSession(event.target.value)}>
-                        <option value="">Select source session</option>
-                        {(session.type === "Warehouse Receive" ? sourceSessions.receiving : sourceSessions.transferIn).map((item) => (
-                          <option key={item.id} value={item.id}>{item.id} / {item.scanned.length} cartons / {new Date(item.updatedAt).toLocaleString()}</option>
-                        ))}
-                      </SelectField>
-                    </div>
-                  ) : null}
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <TextField label="Vehicle number" value={session.vehicle ?? ""} onChange={(event) => setSession({ ...session, vehicle: event.target.value, updatedAt: now() })} />
-                    <TextField label="Driver name" value={session.driver ?? ""} onChange={(event) => setSession({ ...session, driver: event.target.value, updatedAt: now() })} />
-                    <TextField label="LR / docket" value={session.lr ?? ""} onChange={(event) => setSession({ ...session, lr: event.target.value, updatedAt: now() })} />
-                    <TextField label="Transporter" value={session.transporter ?? ""} onChange={(event) => setSession({ ...session, transporter: event.target.value, updatedAt: now() })} />
-                    <SelectField label="Destination" value={session.destinationWarehouseId ?? ""} onChange={(event) => setSession({ ...session, destinationWarehouseId: event.target.value, updatedAt: now() })}>
-                      <option value="">Customer / not applicable</option>
-                      {state.warehouses.filter((item) => item.type === "warehouse").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
-                    </SelectField>
-                    <TextField label="Customer" value={session.customer ?? ""} onChange={(event) => setSession({ ...session, customer: event.target.value, updatedAt: now() })} />
-                  </div>
-                  <form
-                    className="mt-5"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      handleScan(scanInput);
-                    }}
-                  >
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="mm-field">
-                          <span className="mm-field__label">USB/Bluetooth scanner input</span>
-                          <input ref={scanRef} value={scanInput} onChange={(event) => setScanInput(event.target.value)} className="mm-input mm-input--mono h-[52px] border-2 border-[var(--blue-500)] px-4 text-base" placeholder="Scan barcode and press Enter" />
-                        </label>
-                      </div>
-                      <Button variant="accent" className="self-end" onClick={() => handleScan(scanInput)}><QrCode size={18} /> Add</Button>
-                    </div>
-                  </form>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button variant="secondary" onClick={() => setCameraOn((value) => !value)}><Camera size={18} /> Camera</Button>
-                    <Button variant="secondary" onClick={undoLastScan}>Undo last scan</Button>
-                    <Button variant="secondary" onClick={saveDraft}>Save draft</Button>
-                    <Button onClick={finalizeSession} disabled={session.scanned.length === 0}><CheckCircle2 size={18} /> Finalize</Button>
-                  </div>
-                  {scanMessage ? <div className={`mt-4 rounded-xl p-3 text-sm font-bold ${scanMessage.type === "ok" ? "bg-[var(--teal-50)] text-[var(--teal-700)]" : "bg-[var(--danger-50)] text-[var(--danger-700)]"}`}>{scanMessage.text}</div> : null}
-                  {cameraOn ? <CameraScanner onScan={handleScan} /> : null}
-                  <div className="ds-scan-list">
-                    {session.scanned.map((barcode) => {
-                      const carton = operationalCartons.find((item) => item.barcode === barcode);
-                      return carton ? <CartonRow key={barcode} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} /> : null;
-                    })}
-                  </div>
-                </>
-              ) : (
-                <EmptyState text="Start a scan workflow to begin. Inventory movement is locked until finalization." />
-              )}
-            </Card>
-          </section>
+          <OperationalScanWorkspace
+            session={session}
+            scanInput={scanInput}
+            scanRef={scanRef}
+            scanMessage={scanMessage}
+            cameraOn={cameraOn}
+            fullscreen={scanFullscreen}
+            canScan={can(user, "scan")}
+            cartons={operationalCartons}
+            products={operationalProducts}
+            warehouses={state.warehouses}
+            warehouseById={warehouseById}
+            productById={productById}
+            sourceSessions={sourceSessions}
+            drafts={operationalSessions.filter((item) => !item.finalized)}
+            mismatches={operationalMismatches}
+            onStart={startSession}
+            onResume={resumeDraft}
+            onSessionChange={setSession}
+            onSourceSessionChange={updateSourceSession}
+            onScanInput={setScanInput}
+            onScan={handleScan}
+            onUndo={undoLastScan}
+            onSaveDraft={saveDraft}
+            onFinalize={finalizeSession}
+            onToggleCamera={() => setCameraOn((value) => !value)}
+            onToggleFullscreen={() => setScanFullscreen((value) => !value)}
+            onExportPacking={() => session ? exportCsv(`${session.type.toLowerCase().replaceAll(" ", "-")}-packing-list`, session.scanned.map((barcode) => {
+              const carton = operationalCartons.find((item) => item.barcode === barcode);
+              return { barcode, sku: carton?.sku, batch: carton?.batch, warehouse: carton ? warehouseById[carton.warehouseId] : "", status: carton?.status };
+            })) : undefined}
+          />
         ) : null}
 
         {view === "Products" ? (
@@ -2454,6 +2524,623 @@ function WarehouseBars({ warehouses, total }: { warehouses: { label: string; cou
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function WorkflowLanding({
+  tone,
+  title,
+  subtitle,
+  icon,
+  stats,
+  steps,
+  primaryLabel,
+  secondaryLabel,
+  onPrimary,
+  onSecondary,
+  documents,
+  onReprint,
+}: {
+  tone: "orange" | "green" | "blue" | "purple";
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  stats: Array<[string, number]>;
+  steps: string[];
+  primaryLabel: string;
+  secondaryLabel?: string;
+  onPrimary: () => void;
+  onSecondary?: () => void;
+  documents: DocumentRecord[];
+  onReprint: (doc: DocumentRecord) => void;
+}) {
+  return (
+    <section className="ops-page">
+      <div className={`ops-hero ops-hero--${tone}`}>
+        <div className="ops-hero__icon">{icon}</div>
+        <div>
+          <h2>{title}</h2>
+          <p>{subtitle}</p>
+        </div>
+        <div className="ops-hero__actions">
+          {secondaryLabel && onSecondary ? <Button variant="secondary" onClick={onSecondary}>{secondaryLabel}</Button> : null}
+          <Button variant="accent" onClick={onPrimary}>{primaryLabel}</Button>
+        </div>
+      </div>
+      <div className="ops-kpi-row">
+        {stats.map(([label, value]) => <Stat key={label} label={label} value={value} />)}
+      </div>
+      <div className="ops-split">
+        <Card title="Workflow steps">
+          <div className="ops-step-list">
+            {steps.map((step, index) => (
+              <div className="ops-step" key={step}>
+                <span>{index + 1}</span>
+                <strong>{step}</strong>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card title="Recent documents">
+          <div className="ds-doc-grid">
+            {documents.slice(0, 8).map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={onReprint} />)}
+            {!documents.length ? <EmptyState text="No workflow documents yet." /> : null}
+          </div>
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function InventoryWorkbench({
+  cartons,
+  filteredCartons,
+  rows,
+  warehouses,
+  warehouseById,
+  productById,
+  metrics,
+  pendingReceiptCartons,
+  query,
+  onQuery,
+  warehouseFilter,
+  onWarehouseFilter,
+  batchFilter,
+  onBatchFilter,
+  statusFilter,
+  onStatusFilter,
+  productFilter,
+  onProductFilter,
+  expiryFilter,
+  onExpiryFilter,
+  batches,
+  statuses,
+  products,
+  selectedCarton,
+  documents,
+  audit,
+  canReverse,
+  onSelectCarton,
+  onCloseDrawer,
+  onScan,
+  onCreateBatch,
+  onPrintLabels,
+  onExport,
+  onReverse,
+}: {
+  cartons: Carton[];
+  filteredCartons: Carton[];
+  rows: InventoryAggregateRow[];
+  warehouses: WarehouseRecord[];
+  warehouseById: Record<string, string>;
+  productById: Record<string, Product>;
+  metrics: { cartons: number; units: number; inTransit: number; blocked: number; nearExpiry: number; missing: number };
+  pendingReceiptCartons: number;
+  query: string;
+  onQuery: (value: string) => void;
+  warehouseFilter: string;
+  onWarehouseFilter: (value: string) => void;
+  batchFilter: string;
+  onBatchFilter: (value: string) => void;
+  statusFilter: string;
+  onStatusFilter: (value: string) => void;
+  productFilter: string;
+  onProductFilter: (value: string) => void;
+  expiryFilter: string;
+  onExpiryFilter: (value: string) => void;
+  batches: string[];
+  statuses: Status[];
+  products: string[];
+  selectedCarton?: Carton;
+  documents: DocumentRecord[];
+  audit: AuditLog[];
+  canReverse: boolean;
+  onSelectCarton: (barcode: string) => void;
+  onCloseDrawer: () => void;
+  onScan: () => void;
+  onCreateBatch: () => void;
+  onPrintLabels: () => void;
+  onExport: () => void;
+  onReverse: (barcode: string, reason: string) => void;
+}) {
+  return (
+    <section className="ops-page">
+      <div className="ops-toolbar">
+        <div>
+          <h2>Inventory Control</h2>
+          <p>Search by barcode, SKU, GTIN, product, or batch. Stock is calculated from actual carton records only.</p>
+        </div>
+        <div className="ops-toolbar__actions">
+          <Button variant="secondary" onClick={onScan}><QrCode size={18} /> Scan Barcode</Button>
+          <Button variant="secondary" onClick={onCreateBatch}><Boxes size={18} /> Create Batch</Button>
+          <Button variant="secondary" onClick={onPrintLabels}><Printer size={18} /> Print Labels</Button>
+          <Button variant="accent" onClick={onExport}><Download size={18} /> Export Inventory</Button>
+        </div>
+      </div>
+      <div className="ops-kpi-row ops-kpi-row--six">
+        <Stat label="Current cartons" value={cartons.filter((carton) => !lockedStatuses.includes(carton.status)).length} tone="accent" />
+        <Stat label="Current units" value={metrics.units} tone="brand" />
+        <Stat label="In transit" value={metrics.inTransit} tone="warning" />
+        <Stat label="Pending receipts" value={pendingReceiptCartons} />
+        <Stat label="Shortages" value={metrics.missing} tone="danger" />
+        <Stat label="Near expiry" value={metrics.nearExpiry} tone="warning" />
+      </div>
+      <Card>
+        <div className="ops-filter-grid">
+          <label className="mm-field ops-search-field">
+            <span className="mm-field__label">Global search</span>
+            <input className="mm-input" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Barcode, SKU, GTIN, product, batch" />
+          </label>
+          <SelectField label="Warehouse" value={warehouseFilter} onChange={(event) => onWarehouseFilter(event.target.value)}>
+            <option value="">All warehouses</option>
+            {warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+          </SelectField>
+          <SelectField label="Batch" value={batchFilter} onChange={(event) => onBatchFilter(event.target.value)}>
+            <option value="">All batches</option>
+            {batches.map((batch) => <option key={batch} value={batch}>{batch}</option>)}
+          </SelectField>
+          <SelectField label="Status" value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
+            <option value="">All statuses</option>
+            {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
+          </SelectField>
+          <SelectField label="Product" value={productFilter} onChange={(event) => onProductFilter(event.target.value)}>
+            <option value="">All SKUs</option>
+            {products.map((sku) => <option key={sku} value={sku}>{sku}</option>)}
+          </SelectField>
+          <SelectField label="Expiry" value={expiryFilter} onChange={(event) => onExpiryFilter(event.target.value)}>
+            <option value="">All expiry</option>
+            <option value="near">Near expiry</option>
+            <option value="expired">Expired</option>
+          </SelectField>
+        </div>
+      </Card>
+      <Card title={<><Boxes size={18} /> Inventory by SKU, batch, location</>} action={<Tag mono>{filteredCartons.length} cartons</Tag>} pad={false}>
+        <InventoryAggregateTable rows={rows} onSelectCarton={onSelectCarton} />
+      </Card>
+      <Card title="Damage / Write-off Queue">
+        <div className="grid gap-2 md:grid-cols-2">
+          {filteredCartons.filter((carton) => lockedStatuses.includes(carton.status)).slice(0, 12).map((carton) => (
+            <CartonRow key={carton.id} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} canReverse={canReverse} onReverse={onReverse} />
+          ))}
+          {!filteredCartons.some((carton) => lockedStatuses.includes(carton.status)) ? <EmptyState text="No damaged, lost, blocked, expired, or reversed cartons in this view." /> : null}
+        </div>
+      </Card>
+      {selectedCarton ? (
+        <CartonTimelineDrawer carton={selectedCarton} product={productById[selectedCarton.productId]} warehouse={warehouseById[selectedCarton.warehouseId]} documents={documents} audit={audit} onClose={onCloseDrawer} />
+      ) : null}
+    </section>
+  );
+}
+
+function InventoryAggregateTable({ rows, onSelectCarton }: { rows: InventoryAggregateRow[]; onSelectCarton: (barcode: string) => void }) {
+  return (
+    <div className="ds-table-wrap">
+      <table className="ds-table ops-inventory-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>SKU</th>
+            <th>GTIN</th>
+            <th>Batch</th>
+            <th>Warehouse</th>
+            <th>Cartons</th>
+            <th>Units/Carton</th>
+            <th>Total Units</th>
+            <th>Status</th>
+            <th>Last Movement</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.key} onClick={() => onSelectCarton(row.sampleBarcode)} className="ops-click-row">
+              <td className="text-[var(--text-strong)] font-bold">{row.product}</td>
+              <td><Tag mono>{row.sku}</Tag></td>
+              <td className="ds-mono">{row.gtin}</td>
+              <td className="ds-mono">{row.batch}</td>
+              <td>{row.warehouse}</td>
+              <td className="ds-mono">{row.cartons}</td>
+              <td className="ds-mono">{row.unitsPerCarton}</td>
+              <td className="ds-mono">{row.totalUnits}</td>
+              <td><StatusBadge status={row.status} /></td>
+              <td className="ds-mono">{row.lastMovement}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!rows.length ? <EmptyState text="No inventory matches the selected search and filters." /> : null}
+    </div>
+  );
+}
+
+function CartonTimelineDrawer({ carton, product, warehouse, documents, audit, onClose }: { carton: Carton; product?: Product; warehouse: string; documents: DocumentRecord[]; audit: AuditLog[]; onClose: () => void }) {
+  const relatedDocs = documents.filter((doc) => doc.barcodes.includes(carton.barcode));
+  const relatedAudit = audit.filter((item) => item.barcode === carton.barcode);
+  const steps = [
+    { label: "Created", active: true, detail: carton.mfd },
+    { label: "Factory", active: ["IN_FACTORY", "IN_TRANSIT", "RECEIVED_AT_WAREHOUSE", "IN_TRANSIT_TRANSFER", "RECEIVED_AT_DESTINATION", "DISPATCHED_TO_CUSTOMER", "DELIVERED"].includes(carton.status), detail: product?.name ?? carton.flavour },
+    { label: "Dispatch", active: relatedDocs.some((doc) => doc.type.includes("Dispatch")), detail: relatedDocs.find((doc) => doc.type.includes("Dispatch"))?.id },
+    { label: "In Transit", active: carton.status.includes("IN_TRANSIT") || relatedDocs.some((doc) => doc.type.includes("Transfer")), detail: warehouse },
+    { label: "Received", active: ["RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION", "DELIVERED"].includes(carton.status), detail: warehouse },
+    { label: "Customer / Exception", active: ["DISPATCHED_TO_CUSTOMER", "DELIVERED", "DAMAGED", "LOST", "BLOCKED", "EXPIRED"].includes(carton.status), detail: carton.customer ?? carton.status },
+  ];
+  return (
+    <aside className="ops-drawer">
+      <div className="ops-drawer__panel">
+        <div className="ops-drawer__head">
+          <div>
+            <div className="ds-eyebrow">Carton Timeline</div>
+            <h2>{carton.cartonNo}</h2>
+            <p className="ds-mono">{carton.barcode}</p>
+          </div>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+        </div>
+        <div className="ops-carton-summary">
+          <Tag mono>{carton.sku}</Tag>
+          <StatusBadge status={carton.status} />
+          <span>{warehouse}</span>
+          <span>{carton.qty} {carton.qtyUnit}</span>
+        </div>
+        <div className="ops-timeline">
+          {steps.map((step) => (
+            <div className={`ops-timeline__item ${step.active ? "ops-timeline__item--active" : ""}`} key={step.label}>
+              <span />
+              <div>
+                <strong>{step.label}</strong>
+                <p>{step.detail ?? "Pending"}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <Card title="Related documents">
+          <div className="ops-mini-list">
+            {relatedDocs.map((doc) => <div key={doc.id}><strong>{doc.id}</strong><span>{doc.type}</span></div>)}
+            {!relatedDocs.length ? <EmptyState text="No documents attached yet." compact /> : null}
+          </div>
+        </Card>
+        <Card title="Audit history">
+          <div className="ops-mini-list">
+            {relatedAudit.slice(0, 10).map((item) => <div key={item.id}><strong>{item.action}</strong><span>{new Date(item.time).toLocaleString()}</span></div>)}
+            {!relatedAudit.length ? <EmptyState text="No carton audit events yet." compact /> : null}
+          </div>
+        </Card>
+      </div>
+    </aside>
+  );
+}
+
+function OperationalScanWorkspace({
+  session,
+  scanInput,
+  scanRef,
+  scanMessage,
+  cameraOn,
+  fullscreen,
+  canScan,
+  cartons,
+  products,
+  warehouses,
+  warehouseById,
+  productById,
+  sourceSessions,
+  drafts,
+  mismatches,
+  onStart,
+  onResume,
+  onSessionChange,
+  onSourceSessionChange,
+  onScanInput,
+  onScan,
+  onUndo,
+  onSaveDraft,
+  onFinalize,
+  onToggleCamera,
+  onToggleFullscreen,
+  onExportPacking,
+}: {
+  session: ScanSession | null;
+  scanInput: string;
+  scanRef: RefObject<HTMLInputElement | null>;
+  scanMessage: { type: "ok" | "error"; text: string } | null;
+  cameraOn: boolean;
+  fullscreen: boolean;
+  canScan: boolean;
+  cartons: Carton[];
+  products: Product[];
+  warehouses: WarehouseRecord[];
+  warehouseById: Record<string, string>;
+  productById: Record<string, Product>;
+  sourceSessions: { receiving: ScanSession[]; transferIn: ScanSession[] };
+  drafts: ScanSession[];
+  mismatches: MismatchCase[];
+  onStart: (type: ScanSession["type"]) => void;
+  onResume: (id: string) => void;
+  onSessionChange: (session: ScanSession) => void;
+  onSourceSessionChange: (id: string) => void;
+  onScanInput: (value: string) => void;
+  onScan: (barcode: string) => void;
+  onUndo: () => void;
+  onSaveDraft: () => void;
+  onFinalize: () => void;
+  onToggleCamera: () => void;
+  onToggleFullscreen: () => void;
+  onExportPacking: () => void;
+}) {
+  const expected = session?.expected ?? [];
+  const scanned = session?.scanned ?? [];
+  const missing = expected.filter((barcode) => !scanned.includes(barcode));
+  const extra = expected.length ? scanned.filter((barcode) => !expected.includes(barcode)) : [];
+  const duplicateCount = scanned.length - new Set(scanned).size;
+  const errorCount = duplicateCount + extra.length + (scanMessage?.type === "error" ? 1 : 0);
+  const remaining = expected.length ? missing.length : 0;
+  const progress = expected.length ? Math.min(100, (scanned.length / expected.length) * 100) : scanned.length ? 100 : 0;
+  const finalizeCheck = session ? validateFinalizeRule(session) : { ok: false, message: "Start a workflow first." };
+  const shellClass = fullscreen ? "ops-scan-shell ops-scan-shell--fullscreen" : "ops-scan-shell";
+
+  return (
+    <section className={shellClass}>
+      <aside className="ops-workflow-rail">
+        <div className="ops-workflow-rail__title">Start workflow</div>
+        <button className="ops-flow-button ops-flow-button--orange" onClick={() => onStart("Factory Dispatch")} disabled={!canScan}><Truck size={22} /> Factory Dispatch</button>
+        <button className="ops-flow-button ops-flow-button--green" onClick={() => onStart("Warehouse Receive")} disabled={!canScan}><PackageCheck size={22} /> Warehouse Receive</button>
+        <button className="ops-flow-button ops-flow-button--blue" onClick={() => onStart("Transfer Out")} disabled={!canScan}><ArrowRightLeft size={22} /> Transfer Out</button>
+        <button className="ops-flow-button ops-flow-button--blue" onClick={() => onStart("Transfer In")} disabled={!canScan}><ArrowRightLeft size={22} /> Transfer In</button>
+        <button className="ops-flow-button ops-flow-button--purple" onClick={() => onStart("Customer Dispatch")} disabled={!canScan}><Send size={22} /> Customer Dispatch</button>
+        <div className="ops-drafts">
+          <strong>Resume scan sessions</strong>
+          {drafts.length ? drafts.slice(0, 8).map((draft) => (
+            <button key={draft.id} onClick={() => onResume(draft.id)}>
+              <span>{draft.type}</span>
+              <small>{draft.scanned.length} scanned / {new Date(draft.updatedAt).toLocaleString()}</small>
+            </button>
+          )) : <EmptyState text="No saved scan drafts." compact />}
+        </div>
+      </aside>
+      <div className="ops-scan-main">
+        {session ? (
+          <>
+            <ScanRouteHeader session={session} warehouseById={warehouseById} onExportPacking={onExportPacking} onFinalize={onFinalize} onToggleFullscreen={onToggleFullscreen} canFinalize={finalizeCheck.ok && scanned.length > 0} fullscreen={fullscreen} />
+            <ScanWizardSteps session={session} />
+            <div className="ops-count-grid">
+              <CounterCard label="Expected" value={expected.length ? expected.length : "Open"} />
+              <CounterCard label="Scanned" value={scanned.length} tone="blue" />
+              <CounterCard label="Remaining" value={remaining} tone={remaining ? "orange" : "green"} />
+              <CounterCard label="Errors" value={errorCount} tone={errorCount ? "red" : "green"} />
+            </div>
+            <div className="ops-progress"><span style={{ width: `${progress}%` }} /></div>
+            <div className="ops-scan-layout">
+              <ScanEnginePanel
+                session={session}
+                scanInput={scanInput}
+                scanRef={scanRef}
+                scanMessage={scanMessage}
+                cameraOn={cameraOn}
+                sourceSessions={sourceSessions}
+                warehouses={warehouses}
+                onSessionChange={onSessionChange}
+                onSourceSessionChange={onSourceSessionChange}
+                onScanInput={onScanInput}
+                onScan={onScan}
+                onUndo={onUndo}
+                onSaveDraft={onSaveDraft}
+                onFinalize={onFinalize}
+                onToggleCamera={onToggleCamera}
+                canFinalize={finalizeCheck.ok && scanned.length > 0}
+                finalizeMessage={finalizeCheck.message}
+              />
+              <ScanReviewPanel session={session} cartons={cartons} products={products} productById={productById} warehouseById={warehouseById} missing={missing} extra={extra} mismatches={mismatches} />
+            </div>
+          </>
+        ) : (
+          <div className="ops-empty-scan">
+            <QrCode size={42} />
+            <h2>Select a workflow to begin scanning</h2>
+            <p>Every movement remains a draft until finalized. Page refreshes keep finalized operational data in Supabase.</p>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ScanRouteHeader({ session, warehouseById, onExportPacking, onFinalize, onToggleFullscreen, canFinalize, fullscreen }: { session: ScanSession; warehouseById: Record<string, string>; onExportPacking: () => void; onFinalize: () => void; onToggleFullscreen: () => void; canFinalize: boolean; fullscreen: boolean }) {
+  const source = warehouseById[session.sourceWarehouseId] ?? session.sourceWarehouseId;
+  const destination = session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : session.customer ?? "Customer";
+  return (
+    <div className="ops-route-card">
+      <div className="ops-route-card__icon"><Truck size={26} /></div>
+      <div>
+        <h2>{session.id}</h2>
+        <div className="ops-route-meta">
+          <Tag mono>{session.type}</Tag>
+          <span>{source}</span>
+          <span>to</span>
+          <span>{destination}</span>
+          <StatusBadge tone={session.finalized ? "teal" : "blue"}>{session.finalized ? "Finalized" : "Active"}</StatusBadge>
+        </div>
+      </div>
+      <div className="ops-route-card__actions">
+        <Button variant="secondary" onClick={onExportPacking}><Download size={16} /> Excel</Button>
+        <Button variant="secondary" onClick={onToggleFullscreen}>{fullscreen ? "Exit Fullscreen" : "Fullscreen"}</Button>
+        <Button variant="accent" disabled={!canFinalize} onClick={onFinalize}><CheckCircle2 size={18} /> Finalize</Button>
+      </div>
+    </div>
+  );
+}
+
+function ScanWizardSteps({ session }: { session: ScanSession }) {
+  const steps = session.type === "Warehouse Receive"
+    ? ["Select incoming dispatch", "Show expected cartons", "Scan received cartons", "Compare", "Finalize or investigate"]
+    : session.type === "Transfer In"
+      ? ["Select transfer-out", "Show expected", "Scan transfer-in", "Match", "Finalize or investigate"]
+      : session.type === "Transfer Out"
+        ? ["Source warehouse", "Destination warehouse", "Batch/SKU", "Scan transfer-out", "Finalize slip"]
+        : session.type === "Customer Dispatch"
+          ? ["Customer", "Source warehouse", "Batch/SKU", "Scan cartons", "Challan and slip"]
+          : ["Source", "Destination", "Batch/SKU", "Scan cartons", "Packing list", "Dispatch slip"];
+  return (
+    <div className="ops-wizard">
+      {steps.map((step, index) => <div key={step} className={index <= 3 ? "ops-wizard__step ops-wizard__step--active" : "ops-wizard__step"}><span>{index + 1}</span>{step}</div>)}
+    </div>
+  );
+}
+
+function CounterCard({ label, value, tone = "slate" }: { label: string; value: string | number; tone?: "slate" | "blue" | "green" | "orange" | "red" }) {
+  return (
+    <div className={`ops-counter ops-counter--${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ScanEnginePanel({
+  session,
+  scanInput,
+  scanRef,
+  scanMessage,
+  cameraOn,
+  sourceSessions,
+  warehouses,
+  onSessionChange,
+  onSourceSessionChange,
+  onScanInput,
+  onScan,
+  onUndo,
+  onSaveDraft,
+  onFinalize,
+  onToggleCamera,
+  canFinalize,
+  finalizeMessage,
+}: {
+  session: ScanSession;
+  scanInput: string;
+  scanRef: RefObject<HTMLInputElement | null>;
+  scanMessage: { type: "ok" | "error"; text: string } | null;
+  cameraOn: boolean;
+  sourceSessions: { receiving: ScanSession[]; transferIn: ScanSession[] };
+  warehouses: WarehouseRecord[];
+  onSessionChange: (session: ScanSession) => void;
+  onSourceSessionChange: (id: string) => void;
+  onScanInput: (value: string) => void;
+  onScan: (barcode: string) => void;
+  onUndo: () => void;
+  onSaveDraft: () => void;
+  onFinalize: () => void;
+  onToggleCamera: () => void;
+  canFinalize: boolean;
+  finalizeMessage: string;
+}) {
+  const sourceOptions = session.type === "Warehouse Receive" ? sourceSessions.receiving : sourceSessions.transferIn;
+  return (
+    <Card className="ops-scan-card">
+      <div className="ops-card-title"><QrCode size={18} /> What am I scanning?</div>
+      <p className="ops-muted">{session.type.includes("Receive") || session.type === "Transfer In" ? "Scan received cartons from the selected incoming movement." : "Scan carton labels for this outbound movement. USB and Bluetooth scanners work as keyboard input."}</p>
+      {session.type === "Warehouse Receive" || session.type === "Transfer In" ? (
+        <SelectField label="Incoming dispatch / transfer" value={session.sourceSessionId ?? ""} onChange={(event) => onSourceSessionChange(event.target.value)}>
+          <option value="">Select incoming movement</option>
+          {sourceOptions.map((item) => <option key={item.id} value={item.id}>{item.id} / {item.scanned.length} cartons</option>)}
+        </SelectField>
+      ) : null}
+      <div className="ops-form-grid">
+        <SelectField label="Destination / Warehouse" value={session.destinationWarehouseId ?? ""} onChange={(event) => onSessionChange({ ...session, destinationWarehouseId: event.target.value, updatedAt: now() })}>
+          <option value="">Customer / not applicable</option>
+          {warehouses.filter((item) => item.type === "warehouse").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+        </SelectField>
+        <TextField label="Customer" value={session.customer ?? ""} onChange={(event) => onSessionChange({ ...session, customer: event.target.value, updatedAt: now() })} />
+        <TextField label="Vehicle number" value={session.vehicle ?? ""} onChange={(event) => onSessionChange({ ...session, vehicle: event.target.value, updatedAt: now() })} />
+        <TextField label="Driver name" value={session.driver ?? ""} onChange={(event) => onSessionChange({ ...session, driver: event.target.value, updatedAt: now() })} />
+        <TextField label="LR / docket" value={session.lr ?? ""} onChange={(event) => onSessionChange({ ...session, lr: event.target.value, updatedAt: now() })} />
+        <TextField label="Transporter" value={session.transporter ?? ""} onChange={(event) => onSessionChange({ ...session, transporter: event.target.value, updatedAt: now() })} />
+      </div>
+      <form
+        className="ops-scan-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onScan(scanInput);
+        }}
+      >
+        <label className="mm-field">
+          <span className="mm-field__label">Large scanner input</span>
+          <input ref={scanRef} value={scanInput} onChange={(event) => onScanInput(event.target.value)} className="mm-input mm-input--mono ops-scan-input" placeholder="Scan barcode - press Enter" autoComplete="off" />
+        </label>
+        <Button variant="accent" size="lg" onClick={() => onScan(scanInput)}><QrCode size={20} /> Scan</Button>
+      </form>
+      {scanMessage ? <div className={`ops-scan-feedback ops-scan-feedback--${scanMessage.type}`}>{scanMessage.type === "ok" ? "Accepted" : "Review"}: {scanMessage.text}</div> : null}
+      {cameraOn ? <CameraScanner onScan={onScan} /> : null}
+      <div className="ops-scan-actions">
+        <Button variant="secondary" onClick={onToggleCamera}><Camera size={18} /> Camera</Button>
+        <Button variant="secondary" onClick={onUndo}>Undo last scan</Button>
+        <Button variant="secondary" onClick={onSaveDraft}>Save draft</Button>
+      </div>
+      <div className="ops-finalize-note">{canFinalize ? "Ready to finalize." : finalizeMessage}</div>
+      <div className="ops-sticky-finalize">
+        <Button block variant="accent" disabled={!canFinalize} onClick={onFinalize}><CheckCircle2 size={18} /> Finalize movement</Button>
+      </div>
+    </Card>
+  );
+}
+
+function ScanReviewPanel({ session, cartons, productById, warehouseById, missing, extra, mismatches }: { session: ScanSession; cartons: Carton[]; products: Product[]; productById: Record<string, Product>; warehouseById: Record<string, string>; missing: string[]; extra: string[]; mismatches: MismatchCase[] }) {
+  const duplicateCount = session.scanned.length - new Set(session.scanned).size;
+  return (
+    <div className="ops-review-stack">
+      <Card title={<><History size={18} /> Recent scans</>} action={<Tag mono>{session.scanned.length}</Tag>}>
+        <div className="ops-recent-scans">
+          {session.scanned.slice(0, 8).map((barcode) => {
+            const carton = cartons.find((item) => item.barcode === barcode);
+            return (
+              <div key={barcode}>
+                <strong>{carton?.sku ?? "Unknown barcode"}</strong>
+                <span className="ds-mono">{barcode}</span>
+                <StatusBadge status={carton?.status} tone={carton ? undefined : "red"}>{carton?.status ?? "UNKNOWN"}</StatusBadge>
+              </div>
+            );
+          })}
+          {!session.scanned.length ? <EmptyState text="No scans yet." compact /> : null}
+        </div>
+      </Card>
+      <Card title={<><Boxes size={18} /> Packing list</>}>
+        <div className="ops-packing-list">
+          {session.scanned.map((barcode) => {
+            const carton = cartons.find((item) => item.barcode === barcode);
+            return carton ? <CartonRow key={barcode} carton={carton} warehouse={warehouseById[carton.warehouseId]} product={productById[carton.productId]} /> : <div key={barcode} className="ops-unknown-row">{barcode}<StatusBadge tone="red">Unknown barcode</StatusBadge></div>;
+          })}
+          {!session.scanned.length ? <EmptyState text="No cartons scanned yet." compact /> : null}
+        </div>
+      </Card>
+      <Card title="Receiving comparison">
+        <div className="ops-compare-grid">
+          <CounterCard label="Missing" value={missing.length} tone={missing.length ? "red" : "green"} />
+          <CounterCard label="Extra" value={extra.length} tone={extra.length ? "red" : "green"} />
+          <CounterCard label="Duplicate" value={duplicateCount} tone={duplicateCount ? "red" : "green"} />
+          <CounterCard label="Open cases" value={mismatches.filter((item) => item.status !== "Closed").length} tone="orange" />
+        </div>
+        <div className="ops-missing-list">
+          {missing.slice(0, 12).map((barcode) => <div key={barcode} className="ds-mono">{barcode}</div>)}
+          {!missing.length ? <EmptyState text="No missing cartons for the selected movement." compact /> : null}
+        </div>
+      </Card>
     </div>
   );
 }
