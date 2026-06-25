@@ -652,6 +652,7 @@ export default function Home() {
   const warehouseById = useMemo(() => Object.fromEntries(state.warehouses.map((item) => [item.id, item.name])), [state.warehouses]);
   const factoryWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "factory")?.id ?? "factory", [state.warehouses]);
   const transitWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "transit")?.id ?? "transit", [state.warehouses]);
+  const customerHoldWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "customer-hold")?.id ?? transitWarehouseId, [state.warehouses, transitWarehouseId]);
   const primaryWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse")?.id ?? user?.warehouseId ?? "delhi", [state.warehouses, user?.warehouseId]);
   const transferWarehouseId = useMemo(() => state.warehouses.find((item) => item.type === "warehouse" && item.id !== primaryWarehouseId)?.id ?? primaryWarehouseId, [primaryWarehouseId, state.warehouses]);
   const productById = useMemo(() => Object.fromEntries(state.products.map((item) => [item.id, item])), [state.products]);
@@ -729,6 +730,21 @@ export default function Home() {
     });
   }
 
+  function persistSessionSnapshot(nextSession: ScanSession, updater?: (draft: AppState) => void) {
+    setSession(nextSession);
+    setState((current) => {
+      const draft: AppState = JSON.parse(JSON.stringify(current));
+      updater?.(draft);
+      const index = draft.sessions.findIndex((item) => item.id === nextSession.id);
+      if (index >= 0) draft.sessions[index] = nextSession;
+      else draft.sessions.unshift(nextSession);
+      draft.registry = draft.cartons;
+      draft.barcodePatterns = draft.barcodePatterns ?? [];
+      persistState(draft);
+      return draft;
+    });
+  }
+
   function audit(action: string, details: Partial<AuditLog> = {}) {
     if (!user) return;
     mutate((draft) => {
@@ -769,7 +785,7 @@ export default function Home() {
     const source = type === "Warehouse Receive" ? sourceSessions.receiving[0] : type === "Transfer In" ? sourceSessions.transferIn[0] : undefined;
     const sourceWarehouseId = type === "Factory Dispatch" ? factoryWarehouseId : type === "Warehouse Receive" ? transitWarehouseId : type === "Transfer In" ? transitWarehouseId : user.warehouseId;
     const destinationWarehouseId = type === "Factory Dispatch" ? primaryWarehouseId : type === "Warehouse Receive" || type === "Transfer In" ? user.warehouseId : type === "Transfer Out" ? transferWarehouseId : undefined;
-    setSession({
+    const nextSession: ScanSession = {
       id: uid("session"),
       type,
       sourceWarehouseId,
@@ -782,6 +798,16 @@ export default function Home() {
       scanned: [],
       finalized: false,
       dataOrigin: source?.dataOrigin ?? (state.settings.mode === "production" ? "real" : "demo"),
+    };
+    persistSessionSnapshot(nextSession, (draft) => {
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: `${type} job created`,
+        documentRef: nextSession.id,
+      });
     });
     setScanMessage(null);
     setView("Scan");
@@ -820,7 +846,7 @@ export default function Home() {
     const existingCarton = operationalCartons.find((item) => item.barcode === barcode);
     if (!existingCarton) {
       const parsed = parseTemplateBarcode(barcode, operationalProducts);
-      if (parsed?.product && session.type === "Factory Dispatch") {
+      if (parsed?.product && session.type === "Factory Dispatch" && state.managementConfig.settings.autoRegisterCartonOnFirstScan) {
         const duplicateDraft = operationalSessions.find((item) => !item.finalized && item.id !== session.id && item.scanned.includes(barcode));
         if (duplicateDraft || session.scanned.includes(barcode)) {
           setScanMessage({ type: "error", text: "Duplicate scan blocked." });
@@ -852,10 +878,19 @@ export default function Home() {
           status: "IN_FACTORY",
           dataOrigin: product.dataOrigin ?? "real",
         };
-        mutate((draft) => {
+        const nextSession = { ...session, scanned: [barcode, ...session.scanned], updatedAt: now(), dataOrigin: lazyCarton.dataOrigin };
+        persistSessionSnapshot(nextSession, (draft) => {
           if (!draft.cartons.some((item) => item.barcode === barcode)) draft.cartons.push(lazyCarton);
+          draft.audit.unshift({
+            id: uid("audit"),
+            time: now(),
+            userId: user.id,
+            role: user.role,
+            action: "Carton auto-registered from authorized first scan",
+            barcode,
+            newValue: `${lazyCarton.sku} ${lazyCarton.batch} ${lazyCarton.cartonNo}`,
+          });
         });
-        setSession({ ...session, scanned: [barcode, ...session.scanned], updatedAt: now(), dataOrigin: lazyCarton.dataOrigin });
         setScanMessage({ type: "ok", text: `${lazyCarton.sku} carton ${lazyCarton.cartonNo} created lazily and accepted.` });
         setScanInput("");
         playScanTone("ok");
@@ -870,7 +905,18 @@ export default function Home() {
       playScanTone("error");
       return;
     }
-    setSession({ ...session, scanned: [barcode, ...session.scanned], updatedAt: now() });
+    const nextSession = { ...session, scanned: [barcode, ...session.scanned], updatedAt: now() };
+    persistSessionSnapshot(nextSession, (draft) => {
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: `${session.type} carton scanned`,
+        barcode,
+        documentRef: session.id,
+      });
+    });
     setScanInput("");
     playScanTone("ok");
     window.navigator.vibrate?.(35);
@@ -878,7 +924,19 @@ export default function Home() {
 
   function undoLastScan() {
     if (!session || session.scanned.length === 0) return;
-    setSession({ ...session, scanned: session.scanned.slice(1), updatedAt: now() });
+    const removed = session.scanned[0];
+    persistSessionSnapshot({ ...session, scanned: session.scanned.slice(1), updatedAt: now() }, (draft) => {
+      if (!user) return;
+      draft.audit.unshift({
+        id: uid("audit"),
+        time: now(),
+        userId: user.id,
+        role: user.role,
+        action: `${session.type} scan undone`,
+        barcode: removed,
+        documentRef: session.id,
+      });
+    });
     setScanMessage({ type: "ok", text: "Last scan removed before finalization." });
   }
 
@@ -903,7 +961,7 @@ export default function Home() {
   function updateSourceSession(sourceSessionId: string) {
     if (!session) return;
     const source = [...sourceSessions.receiving, ...sourceSessions.transferIn].find((item) => item.id === sourceSessionId);
-    setSession({
+    persistSessionSnapshot({
       ...session,
       sourceSessionId: source?.id,
       expected: source?.scanned ?? [],
@@ -915,7 +973,7 @@ export default function Home() {
 
   function finalizeSession() {
     if (!session || !user || session.scanned.length === 0) return;
-    const finalizeCheck = validateFinalizeRule(session);
+    const finalizeCheck = validateFinalizeRule(session, state.managementConfig.settings.requiredDispatchFields);
     if (!finalizeCheck.ok) {
       setScanMessage({ type: "error", text: finalizeCheck.message });
       return;
@@ -941,14 +999,20 @@ export default function Home() {
     const expected = session.expected ?? [];
     const missing = expected.filter((barcode) => !session.scanned.includes(barcode));
     const extra = expected.length ? session.scanned.filter((barcode) => !expected.includes(barcode)) : [];
+    const isInbound = session.type === "Warehouse Receive" || session.type === "Transfer In";
+    const hasMismatch = isInbound && (missing.length > 0 || extra.length > 0);
     mutate((draft) => {
       session.scanned.forEach((barcode) => {
         const carton = draft.cartons.find((item) => item.barcode === barcode);
         if (!carton) return;
         const oldValue = carton.status;
         carton.status = newStatus[session.type] ?? carton.status;
-        carton.warehouseId = session.type.includes("Dispatch") || session.type === "Transfer Out" ? transitWarehouseId : session.destinationWarehouseId ?? carton.warehouseId;
-        if (session.type === "Customer Dispatch") carton.customer = session.customer || "Modern Trade Customer";
+        if (session.type === "Factory Dispatch" || session.type === "Transfer Out") carton.warehouseId = transitWarehouseId;
+        if (session.type === "Warehouse Receive" || session.type === "Transfer In") carton.warehouseId = session.destinationWarehouseId ?? carton.warehouseId;
+        if (session.type === "Customer Dispatch") {
+          carton.warehouseId = customerHoldWarehouseId;
+          carton.customer = session.customer || "Modern Trade Customer";
+        }
         draft.audit.unshift({
           id: uid("audit"),
           time: now(),
@@ -961,7 +1025,27 @@ export default function Home() {
           newValue: carton.status,
         });
       });
-      const finalized = { ...session, finalized: true, updatedAt: now(), mismatch: missing.length || extra.length ? "Mismatch found" : undefined };
+      if (hasMismatch) {
+        missing.forEach((barcode) => {
+          const carton = draft.cartons.find((item) => item.barcode === barcode);
+          if (!carton) return;
+          const oldValue = carton.status;
+          carton.status = "UNDER_INVESTIGATION";
+          carton.blockedReason = "Missing during inbound receipt. Shortage case open.";
+          draft.audit.unshift({
+            id: uid("audit"),
+            time: now(),
+            userId: user.id,
+            role: user.role,
+            action: `${session.type} missing carton moved to investigation`,
+            barcode,
+            documentRef: docId,
+            oldValue,
+            newValue: carton.status,
+          });
+        });
+      }
+      const finalized = { ...session, finalized: true, updatedAt: now(), mismatch: hasMismatch ? "UNDER_INVESTIGATION" : undefined };
       const sessionIndex = draft.sessions.findIndex((item) => item.id === session.id);
       if (sessionIndex >= 0) draft.sessions[sessionIndex] = finalized;
       else draft.sessions.unshift(finalized);
@@ -977,7 +1061,7 @@ export default function Home() {
         lr: session.lr,
         transporter: session.transporter,
         notes: session.notes,
-        discrepancy: missing.length || extra.length ? `Missing: ${missing.length}, Extra: ${extra.length}` : undefined,
+        discrepancy: hasMismatch ? `Investigation required. Missing: ${missing.length}, Extra: ${extra.length}` : undefined,
         barcodes: session.scanned,
         dataOrigin: session.dataOrigin,
       });
@@ -1015,7 +1099,7 @@ export default function Home() {
           dataOrigin: session.dataOrigin,
         });
       }
-      if (missing.length || extra.length) {
+      if (hasMismatch) {
         draft.mismatches.unshift({
           id: `CASE-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.mismatches.length + 1).padStart(3, "0")}`,
           sessionId: session.id,
@@ -1024,13 +1108,13 @@ export default function Home() {
           missing,
           extra,
           duplicates: [],
-          reason: "Auto-created from receiving/transfer mismatch.",
+          reason: "Auto-created from receiving/transfer mismatch. Missing cartons were marked UNDER_INVESTIGATION.",
           dataOrigin: session.dataOrigin,
         });
       }
     });
     setSession(null);
-    setScanMessage({ type: "ok", text: `${docType} finalized and inventory moved.` });
+    setScanMessage({ type: hasMismatch ? "error" : "ok", text: hasMismatch ? `${docType} finalized with investigation case. Missing cartons are blocked from inventory.` : `${docType} finalized and inventory moved.` });
     setView("Documents");
   }
 
@@ -2188,7 +2272,7 @@ export default function Home() {
             canReverse={hasPermission(state, user, "Inventory", "approve")}
             onSelectCarton={setSelectedCartonBarcode}
             onCloseDrawer={() => setSelectedCartonBarcode("")}
-            onScan={() => setView("Scan")}
+            onScan={() => (can(user, "sensitive") ? setView("Scan") : setScanMessage({ type: "error", text: "Stock Adjustment / Scan In is restricted to Admin and Accountant." }))}
             onCreateBatch={() => setView("Products")}
             onPrintLabels={() => setView("Documents")}
             onExport={() => exportCsv("inventory-snapshot", inventoryFilteredCartons.map((carton) => ({ barcode: carton.barcode, sku: carton.sku, gtin: carton.gtin, batch: carton.batch, warehouse: warehouseById[carton.warehouseId], cartons: 1, units: carton.qty, status: carton.status, expiry: carton.expiry })))}
@@ -2259,7 +2343,7 @@ export default function Home() {
             mismatches={operationalMismatches}
             onStart={startSession}
             onResume={resumeDraft}
-            onSessionChange={setSession}
+            onSessionChange={(nextSession) => persistSessionSnapshot(nextSession)}
             onSourceSessionChange={updateSourceSession}
             onScanInput={setScanInput}
             onScan={handleScan}
@@ -3387,7 +3471,7 @@ function InventoryWorkbench({
           <p>Search by barcode, SKU, GTIN, product, or batch. Stock is calculated from actual carton records only.</p>
         </div>
         <div className="ops-toolbar__actions">
-          <Button variant="secondary" onClick={onScan}><QrCode size={18} /> Scan Barcode</Button>
+          <Button variant="secondary" onClick={onScan}><QrCode size={18} /> Stock Adjustment</Button>
           <Button variant="secondary" onClick={onCreateBatch}><Boxes size={18} /> Create Batch</Button>
           <Button variant="secondary" onClick={onPrintLabels}><Printer size={18} /> Print Labels</Button>
           <Button variant="accent" onClick={onExport}><Download size={18} /> Export Inventory</Button>
@@ -3609,7 +3693,7 @@ function OperationalScanWorkspace({
   const errorCount = duplicateCount + extra.length + (scanMessage?.type === "error" ? 1 : 0);
   const remaining = expected.length ? missing.length : 0;
   const progress = expected.length ? Math.min(100, (scanned.length / expected.length) * 100) : scanned.length ? 100 : 0;
-  const finalizeCheck = session ? validateFinalizeRule(session) : { ok: false, message: "Start a workflow first." };
+  const finalizeCheck = session ? validateFinalizeRule(session, ["destinationWarehouseId"]) : { ok: false, message: "Start a workflow first." };
   const shellClass = fullscreen ? "ops-scan-shell ops-scan-shell--fullscreen" : "ops-scan-shell";
 
   return (

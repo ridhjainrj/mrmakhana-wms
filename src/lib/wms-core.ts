@@ -69,6 +69,7 @@ export type WmsScanSession = {
 };
 
 export const lockedStatuses: WmsStatus[] = ["DAMAGED", "LOST", "BLOCKED", "EXPIRED", "VOIDED", "REVERSED", "UNDER_INVESTIGATION"];
+export const availableStatuses: WmsStatus[] = ["IN_FACTORY", "RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"];
 export const sensitiveRoles: WmsRole[] = ["Admin", "Accountant"];
 export const managerRoles: WmsRole[] = ["Admin", "Accountant", "Warehouse Manager"];
 export const barcodeTemplate = "{PREFIX}{GTIN}{BATCH}{WEIGHT}{QTY}{QTY_UNIT}{MRP}{VARIANT}{CARTON_NO}";
@@ -221,25 +222,29 @@ export function validateScanRule(
   if (lockedStatuses.includes(carton.status)) return { ok: false, message: `Carton is ${carton.status}; scan blocked.` };
   if (daysFrom(carton.expiry, baseDate) < 0) return { ok: false, message: "Expired carton blocked." };
   if (activeSession.expected?.length && !activeSession.expected.includes(barcode)) return { ok: false, message: "Carton is not part of the selected dispatch/transfer." };
-  if (activeSession.type === "Factory Dispatch" && (carton.warehouseId !== "factory" || carton.status !== "IN_FACTORY")) {
-    return { ok: false, message: "Wrong location or invalid status for factory dispatch." };
+  if (activeSession.type === "Factory Dispatch" && (carton.warehouseId !== activeSession.sourceWarehouseId || !availableStatuses.includes(carton.status))) {
+    return { ok: false, message: "Wrong source location or carton is not available for dispatch." };
   }
   if (activeSession.type === "Warehouse Receive" && (!activeSession.sourceSessionId || carton.status !== "IN_TRANSIT")) {
     return { ok: false, message: "Receiving must happen against a selected in-transit dispatch." };
   }
-  if (activeSession.type === "Transfer Out" && carton.warehouseId !== activeSession.sourceWarehouseId) return { ok: false, message: "Carton is not in the selected source warehouse." };
+  if (activeSession.type === "Transfer Out" && (carton.warehouseId !== activeSession.sourceWarehouseId || !availableStatuses.includes(carton.status))) {
+    return { ok: false, message: "Carton is not available in the selected source warehouse." };
+  }
   if (activeSession.type === "Transfer In" && (!activeSession.sourceSessionId || carton.status !== "IN_TRANSIT_TRANSFER")) {
     return { ok: false, message: "Transfer receiving must happen against a selected in-transit transfer." };
   }
-  if (activeSession.type === "Customer Dispatch" && !["RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(carton.status)) return { ok: false, message: "Only received warehouse stock can be dispatched to customer." };
+  if (activeSession.type === "Customer Dispatch" && (carton.warehouseId !== activeSession.sourceWarehouseId || !["RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(carton.status))) {
+    return { ok: false, message: "Only available stock in the dispatching warehouse can be shipped to customer." };
+  }
   return { ok: true, message: `${carton.sku} carton ${carton.cartonNo} accepted.` };
 }
 
-export function validateFinalizeRule(activeSession: WmsScanSession) {
+export function validateFinalizeRule(activeSession: WmsScanSession, requiredDispatchFields: string[] = ["destinationWarehouseId"]) {
   if (activeSession.scanned.length === 0) return { ok: false, message: "Scan at least one carton before finalization." };
   if (activeSession.type === "Factory Dispatch") {
-    if (!activeSession.vehicle?.trim()) return { ok: false, message: "Vehicle number is required for factory dispatch." };
-    if (!activeSession.driver?.trim()) return { ok: false, message: "Driver name is required for factory dispatch." };
+    if (requiredDispatchFields.includes("vehicle") && !activeSession.vehicle?.trim()) return { ok: false, message: "Vehicle number is required for factory dispatch." };
+    if (requiredDispatchFields.includes("driver") && !activeSession.driver?.trim()) return { ok: false, message: "Driver name is required for factory dispatch." };
     if (!activeSession.destinationWarehouseId) return { ok: false, message: "Destination warehouse is required for factory dispatch." };
   }
   if ((activeSession.type === "Warehouse Receive" || activeSession.type === "Transfer In") && !activeSession.sourceSessionId) {

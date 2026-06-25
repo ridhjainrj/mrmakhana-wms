@@ -124,7 +124,7 @@ test("factory dispatch blocks wrong warehouse and already in-transit cartons", (
   const wrongWarehouse = carton({ warehouseId: "delhi", status: "RECEIVED_AT_WAREHOUSE" });
   const result = validateScanRule(wrongWarehouse.barcode, session(), [wrongWarehouse], [product], new Date("2026-06-24"));
   assert.equal(result.ok, false);
-  assert.match(result.message, /Wrong location/);
+  assert.match(result.message, /Wrong source location/);
 
   const inTransit = carton({ warehouseId: "transit", status: "IN_TRANSIT" });
   const transitResult = validateScanRule(inTransit.barcode, session(), [inTransit], [product], new Date("2026-06-24"));
@@ -157,7 +157,7 @@ test("receiving requires a selected dispatch and expected barcode membership", (
 });
 
 test("finalization requires operational fields", () => {
-  assert.equal(validateFinalizeRule(session({ vehicle: "", scanned: ["b1"] })).ok, false);
+  assert.equal(validateFinalizeRule(session({ vehicle: "", scanned: ["b1"] }), ["vehicle", "driver", "destinationWarehouseId"]).ok, false);
   assert.equal(validateFinalizeRule(session({ scanned: ["b1"] })).ok, true);
   assert.equal(validateFinalizeRule(session({ type: "Warehouse Receive", sourceWarehouseId: "transit", destinationWarehouseId: "delhi", scanned: ["b1"] })).ok, false);
   assert.equal(validateFinalizeRule(session({ type: "Customer Dispatch", sourceWarehouseId: "delhi", destinationWarehouseId: undefined, customer: "", scanned: ["b1"] })).ok, false);
@@ -170,5 +170,19 @@ test("customer dispatch only allows received warehouse stock", () => {
 
   const received = carton({ warehouseId: "delhi", status: "RECEIVED_AT_WAREHOUSE" });
   const ok = validateScanRule(received.barcode, session({ type: "Customer Dispatch", sourceWarehouseId: "delhi", customer: "Retailer" }), [received], [product], new Date("2026-06-24"));
+  assert.equal(ok.ok, true);
+
+  const wrongWarehouse = carton({ warehouseId: "mumbai", status: "RECEIVED_AT_WAREHOUSE" });
+  const blocked = validateScanRule(wrongWarehouse.barcode, session({ type: "Customer Dispatch", sourceWarehouseId: "delhi", customer: "Retailer" }), [wrongWarehouse], [product], new Date("2026-06-24"));
+  assert.equal(blocked.ok, false);
+});
+
+test("transfer out requires available stock in the selected source warehouse", () => {
+  const unavailable = carton({ warehouseId: "delhi", status: "IN_TRANSIT" });
+  const blocked = validateScanRule(unavailable.barcode, session({ type: "Transfer Out", sourceWarehouseId: "delhi", destinationWarehouseId: "mumbai" }), [unavailable], [product], new Date("2026-06-24"));
+  assert.equal(blocked.ok, false);
+
+  const available = carton({ warehouseId: "delhi", status: "RECEIVED_AT_WAREHOUSE" });
+  const ok = validateScanRule(available.barcode, session({ type: "Transfer Out", sourceWarehouseId: "delhi", destinationWarehouseId: "mumbai" }), [available], [product], new Date("2026-06-24"));
   assert.equal(ok.ok, true);
 });
