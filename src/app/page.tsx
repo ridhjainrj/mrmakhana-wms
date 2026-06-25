@@ -133,7 +133,15 @@ type WarehouseRecord = {
   id: string;
   dbId?: string;
   name: string;
-  type: "factory" | "warehouse" | "transit" | "damage-hold" | "virtual";
+  type: "factory" | "warehouse" | "transit" | "damage-hold" | "customer-hold" | "virtual";
+  code?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  contactPerson?: string;
+  phone?: string;
+  email?: string;
+  active?: boolean;
   archived?: boolean;
 };
 
@@ -269,6 +277,7 @@ type MasterRecord = {
   code: string;
   status: MasterStatus;
   description?: string;
+  metadata?: Record<string, string>;
   owner?: string;
   updatedAt: string;
   archived?: boolean;
@@ -409,6 +418,14 @@ const permissionActions: PermissionAction[] = ["view", "create", "edit", "archiv
 
 function masterRecord(name: string, code: string, description = "", owner = "System"): MasterRecord {
   return { id: uid("master"), name, code, description, owner, status: "Active", updatedAt: now() };
+}
+
+function metadataFromForm(form: FormData, exclude: string[] = ["name", "code", "description"]) {
+  const metadata: Record<string, string> = {};
+  form.forEach((value, key) => {
+    if (!exclude.includes(key)) metadata[key] = String(value);
+  });
+  return metadata;
 }
 
 function defaultPermissions(): PermissionGrant[] {
@@ -1454,7 +1471,7 @@ export default function Home() {
     mutate((draft) => {
       const list = draft.managementConfig.masters[masterKey] ?? [];
       if (list.some((item) => item.code.toLowerCase() === code.toLowerCase())) return;
-      list.unshift(masterRecord(name, code, String(form.get("description") ?? ""), user.name));
+      list.unshift({ ...masterRecord(name, code, String(form.get("description") ?? ""), user.name), metadata: metadataFromForm(form) });
       draft.managementConfig.masters[masterKey] = list;
       draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Master data created", newValue: `${masterKey}:${code}` });
     });
@@ -1474,7 +1491,7 @@ export default function Home() {
     });
   }
 
-  function updateMasterRecord(masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">>) {
+  function updateMasterRecord(masterKey: MasterKey, id: string, updates: Partial<Pick<MasterRecord, "name" | "code" | "description">> & { metadata?: Record<string, string> }) {
     if (!user || user.role !== "Admin") return;
     mutate((draft) => {
       const record = draft.managementConfig.masters[masterKey]?.find((item) => item.id === id);
@@ -1483,9 +1500,19 @@ export default function Home() {
       record.name = updates.name?.trim() || record.name;
       record.code = updates.code?.trim().toUpperCase() || record.code;
       record.description = updates.description ?? record.description;
+      record.metadata = { ...(record.metadata ?? {}), ...(updates.metadata ?? {}) };
       record.owner = user.name;
       record.updatedAt = now();
       draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Master data edited", oldValue, newValue: `${masterKey}:${record.code}:${record.name}` });
+    });
+  }
+
+  function updateMasterRecordFromForm(masterKey: MasterKey, id: string, form: FormData) {
+    updateMasterRecord(masterKey, id, {
+      name: String(form.get("name") ?? ""),
+      code: String(form.get("code") ?? ""),
+      description: String(form.get("description") ?? ""),
+      metadata: metadataFromForm(form),
     });
   }
 
@@ -1565,7 +1592,20 @@ export default function Home() {
     if (!nameValue) return;
     mutate((draft) => {
       if (draft.warehouses.some((item) => item.name.toLowerCase() === nameValue.toLowerCase())) return;
-      const location: WarehouseRecord = { id: normalizeSkuPart(nameValue).toLowerCase(), name: nameValue, type: typeValue, archived: false };
+      const location: WarehouseRecord = {
+        id: normalizeSkuPart(String(form.get("code") || nameValue)).toLowerCase(),
+        name: nameValue,
+        code: String(form.get("code") || normalizeSkuPart(nameValue)),
+        type: typeValue,
+        address: String(form.get("address") ?? ""),
+        city: String(form.get("city") ?? ""),
+        state: String(form.get("state") ?? ""),
+        contactPerson: String(form.get("contactPerson") ?? ""),
+        phone: String(form.get("phone") ?? ""),
+        email: String(form.get("email") ?? ""),
+        active: form.get("active") !== "inactive",
+        archived: false,
+      };
       draft.warehouses.push(location);
       draft.managementConfig.managedWarehouses = draft.warehouses;
       draft.managementConfig.masters.locations.unshift(masterRecord(location.name, `LOC-${normalizeSkuPart(location.name).slice(0, 16)}`, `${location.type} location`, user.name));
@@ -1580,7 +1620,15 @@ export default function Home() {
       if (!location) return;
       const oldValue = `${location.name}:${location.type}`;
       location.name = String(form.get("name") ?? location.name).trim() || location.name;
+      location.code = String(form.get("code") ?? location.code ?? "").trim() || location.code;
       location.type = String(form.get("type") ?? location.type) as WarehouseRecord["type"];
+      location.address = String(form.get("address") ?? location.address ?? "");
+      location.city = String(form.get("city") ?? location.city ?? "");
+      location.state = String(form.get("state") ?? location.state ?? "");
+      location.contactPerson = String(form.get("contactPerson") ?? location.contactPerson ?? "");
+      location.phone = String(form.get("phone") ?? location.phone ?? "");
+      location.email = String(form.get("email") ?? location.email ?? "");
+      location.active = form.get("active") !== "inactive";
       draft.managementConfig.managedWarehouses = draft.warehouses;
       draft.audit.unshift({ id: uid("audit"), time: now(), userId: user.id, role: user.role, action: "Location edited", oldValue, newValue: `${location.name}:${location.type}` });
     });
@@ -1651,6 +1699,8 @@ export default function Home() {
   function updateManagementSettings(form: FormData) {
     if (!user || user.role !== "Admin") return;
     mutate((draft) => {
+      const appMode = String(form.get("appMode"));
+      if (appMode === "development" || appMode === "production") draft.settings.mode = appMode;
       draft.managementConfig.settings = {
         ...draft.managementConfig.settings,
         defaultFactory: String(form.get("defaultFactory") || draft.managementConfig.settings.defaultFactory),
@@ -1661,6 +1711,8 @@ export default function Home() {
         scannerSounds: form.get("scannerSounds") === "on",
         autoRegisterCartonOnFirstScan: form.get("autoRegisterCartonOnFirstScan") === "on",
         twoLevelApprovals: form.get("twoLevelApprovals") === "on",
+        requiredDispatchFields: String(form.get("requiredDispatchFields") || "").split(",").map((item) => item.trim()).filter(Boolean),
+        requiredReceivingFields: String(form.get("requiredReceivingFields") || "").split(",").map((item) => item.trim()).filter(Boolean),
         barcodeFormatDefault: String(form.get("barcodeFormatDefault") || barcodeTemplate),
         cartonNumberLength: Number(form.get("cartonNumberLength") || 5),
         documentPrefixes: {
@@ -1793,9 +1845,29 @@ export default function Home() {
       ],
     },
     {
+      title: "Admin",
+      items: [
+        { label: "Users", icon: UserCog, show: user.role === "Admin" },
+        { label: "Admin Panel", icon: ShieldCheck, show: user.role === "Admin" },
+        { label: "Roles & Permissions", icon: Lock, show: user.role === "Admin" },
+        { label: "Locations", icon: MapPin, show: user.role === "Admin" },
+        { label: "Customers", icon: Users, show: user.role === "Admin" },
+        { label: "Products & SKUs", icon: Archive, show: user.role === "Admin" },
+        { label: "Barcode Templates", icon: QrCode, show: user.role === "Admin" },
+        { label: "Batches", icon: Boxes, show: user.role === "Admin" },
+        { label: "Transporters", icon: Truck, show: user.role === "Admin" },
+        { label: "Vehicles & Drivers", icon: Users, show: user.role === "Admin" },
+        { label: "System Settings", icon: Settings, show: user.role === "Admin" },
+        { label: "Approval Settings", icon: ClipboardCheck, show: user.role === "Admin" },
+        { label: "Numbering Series", icon: FileText, show: user.role === "Admin" },
+        { label: "Import / Export", icon: Upload, show: user.role === "Admin" },
+        { label: "Demo Data Manager", icon: Database, show: user.role === "Admin" },
+        { label: "Audit Logs", icon: History, show: user.role === "Admin" },
+      ],
+    },
+    {
       title: "System",
       items: [
-        { label: "Admin Panel", icon: ShieldCheck, show: user.role === "Admin" },
         { label: "Import Data", icon: Upload, show: hasPermission(state, user, "Import Data", "view") },
         { label: "Documents", icon: FileText, show: hasPermission(state, user, "Documents", "view") },
         { label: "Reports", icon: BarChart3, show: hasPermission(state, user, "Reports", "view") },
@@ -1882,6 +1954,17 @@ export default function Home() {
     Users: "Role-based users and warehouse assignments.",
     Locations: "Factory, warehouse, and transit location analytics.",
     "Admin Panel": "Admin control centre for users, roles, masters, locations, products, settings, and audit safety.",
+    "Roles & Permissions": "Create roles and assign module-level permissions.",
+    "Products & SKUs": "Manage products, SKUs, carton quantities, and product status.",
+    "Barcode Templates": "Create, edit, and preview barcode template output.",
+    Batches: "Manage batch masters and generate carton ranges.",
+    Transporters: "Manage logistics partners used in dispatch workflows.",
+    "Vehicles & Drivers": "Manage vehicle numbers, drivers, and driver phone numbers.",
+    "System Settings": "Configure scanner, stock rules, modes, defaults, and prefixes.",
+    "Approval Settings": "Configure approvals, reasons, and two-person rules.",
+    "Numbering Series": "Configure document prefixes and numbering series.",
+    "Import / Export": "Import and export master/operational data.",
+    "Demo Data Manager": "Archive, restore, or cut over demo/UAT data.",
     "Import Data": "Excel SKU master import with validation and duplicate checks.",
     Documents: "Dispatch, receiving, transfer, and batch slips.",
     Reports: "Operational reports generated from Supabase-backed data.",
@@ -2248,7 +2331,7 @@ export default function Home() {
                 {!customerDispatches.length ? <EmptyState text="No customer dispatch records yet." /> : null}
               </div>
             </Card>
-            <MasterDataCenter title="Customer Master" masterKey="customers" records={state.managementConfig.masters.customers} canManage={hasPermission(state, user, "Customers", "create")} onAdd={addMasterRecord} onEdit={updateMasterRecord} onStatus={setMasterStatus} />
+            <StructuredMasterPanel title="Customer Master" masterKey="customers" records={state.managementConfig.masters.customers} fields={[["type", "Type"], ["gstin", "GSTIN"], ["billingAddress", "Billing address"], ["shippingAddress", "Shipping address"], ["contactPerson", "Contact person"], ["phone", "Phone"], ["email", "Email"], ["paymentTerms", "Payment terms"], ["active", "Active/Inactive"]]} canManage={hasPermission(state, user, "Customers", "create")} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
           </section>
         ) : null}
 
@@ -2269,6 +2352,7 @@ export default function Home() {
             documents={state.documents}
             audit={state.audit}
             config={state.managementConfig}
+            appMode={state.settings.mode}
             canManage={user.role === "Admin"}
             onAddUser={addAdminUser}
             onUpdateUser={updateAdminUser}
@@ -2288,7 +2372,60 @@ export default function Home() {
           />
         ) : null}
 
-        {view === "Import Data" ? (
+        {view === "Roles & Permissions" ? (
+          <section className="ds-screen">
+            <StructuredMasterPanel title="Roles" masterKey="roles" records={state.managementConfig.masters.roles} fields={[["description", "Description"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+            <PermissionMatrix permissions={state.managementConfig.permissions} onToggle={togglePermission} />
+          </section>
+        ) : null}
+
+        {view === "Products & SKUs" ? (
+          <AdminProductsPanel products={state.products} cartons={state.cartons} patterns={state.barcodePatterns} canManage={user.role === "Admin"} onAdd={addProduct} onUpdate={updateProductAdmin} onArchive={archiveProductAdmin} />
+        ) : null}
+
+        {view === "Barcode Templates" ? (
+          <StructuredMasterPanel title="Barcode Templates" masterKey="barcodeTemplates" records={state.managementConfig.masters.barcodeTemplates} fields={[["template", "Template"], ["prefix", "Prefix"], ["gtin", "GTIN"], ["batch", "Batch"], ["weight", "Weight"], ["qty", "Qty"], ["qtyUnit", "Qty Unit"], ["mrp", "MRP"], ["variant", "Variant"], ["cartonNo", "Carton No"]]} preview="barcode" canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+        ) : null}
+
+        {view === "Batches" ? (
+          <section className="ds-screen">
+            <StructuredMasterPanel title="Batches" masterKey="batches" records={state.managementConfig.masters.batches} fields={[["productSku", "Product SKU"], ["mfd", "MFD"], ["expiry", "Expiry"], ["status", "Status"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+            <ProductsPanel products={operationalProducts} cartons={operationalCartons} patterns={state.barcodePatterns} onAddProduct={addProduct} onGenerateBatch={generateBatch} />
+          </section>
+        ) : null}
+
+        {view === "Transporters" ? (
+          <StructuredMasterPanel title="Transporters" masterKey="transporters" records={state.managementConfig.masters.transporters} fields={[["contactPerson", "Contact person"], ["phone", "Phone"], ["email", "Email"], ["gstin", "GSTIN"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+        ) : null}
+
+        {view === "Vehicles & Drivers" ? (
+          <section className="ds-screen">
+            <StructuredMasterPanel title="Vehicles" masterKey="vehicles" records={state.managementConfig.masters.vehicles} fields={[["vehicleNumber", "Vehicle number"], ["transporter", "Transporter"], ["capacity", "Capacity"], ["status", "Status"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+            <StructuredMasterPanel title="Drivers" masterKey="drivers" records={state.managementConfig.masters.drivers} fields={[["phone", "Driver phone"], ["license", "License"], ["transporter", "Transporter"], ["status", "Status"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+          </section>
+        ) : null}
+
+        {view === "System Settings" ? (
+          <section className="ds-screen">
+            <SystemSettingsPanel settings={state.managementConfig.settings} appMode={state.settings.mode} warehouses={state.warehouses} onSave={updateManagementSettings} />
+          </section>
+        ) : null}
+
+        {view === "Approval Settings" ? (
+          <section className="ds-screen">
+            <StructuredMasterPanel title="Approval Rules" masterKey="approvalRules" records={state.managementConfig.masters.approvalRules} fields={[["module", "Module"], ["level", "Approval level"], ["approverRole", "Approver role"], ["required", "Required"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+            <StructuredMasterPanel title="Approval Reasons" masterKey="approvalReasons" records={state.managementConfig.masters.approvalReasons} fields={[["module", "Module"], ["requiresNote", "Requires note"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+          </section>
+        ) : null}
+
+        {view === "Numbering Series" ? (
+          <section className="ds-screen">
+            <StructuredMasterPanel title="Document Numbering" masterKey="documentNumbering" records={state.managementConfig.masters.documentNumbering} fields={[["prefix", "Prefix"], ["nextNumber", "Next number"], ["padding", "Padding"], ["resetRule", "Reset rule"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+            <StructuredMasterPanel title="Numbering Series" masterKey="numberingSeries" records={state.managementConfig.masters.numberingSeries} fields={[["prefix", "Prefix"], ["nextNumber", "Next number"], ["padding", "Padding"]]} canManage={user.role === "Admin"} onAdd={addMasterRecord} onUpdate={updateMasterRecordFromForm} onArchive={(key, id) => setMasterStatus(key, id, "Archived")} />
+          </section>
+        ) : null}
+
+        {view === "Import Data" || view === "Import / Export" ? (
           <section className="grid gap-5">
             <Card>
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2404,7 +2541,7 @@ export default function Home() {
           <ReportTable title="User activity and audit logs" rows={state.audit.map((item) => ({ time: item.time, user: state.users.find((entry) => entry.id === item.userId)?.name, role: item.role, action: item.action, barcode: item.barcode, document: item.documentRef, old: item.oldValue, new: item.newValue, reason: item.reason }))} />
         ) : null}
 
-        {view === "Demo / Production Mode" ? (
+        {view === "Demo / Production Mode" || view === "Demo Data Manager" ? (
           <DemoDataManager
             mode={state.settings.mode}
             goLiveAt={state.settings.goLiveAt}
@@ -2456,7 +2593,7 @@ export default function Home() {
                 </div>
               </div>
             </Card>
-            <SystemSettingsPanel settings={state.managementConfig.settings} warehouses={state.warehouses} onSave={updateManagementSettings} />
+            <SystemSettingsPanel settings={state.managementConfig.settings} appMode={state.settings.mode} warehouses={state.warehouses} onSave={updateManagementSettings} />
             <PermissionMatrix permissions={state.managementConfig.permissions} onToggle={togglePermission} />
             <MasterDataSuite config={state.managementConfig} canManage={user.role === "Admin"} onAdd={addMasterRecord} onEdit={updateMasterRecord} onStatus={setMasterStatus} />
             <AdminSafetyPanel products={state.products} warehouses={state.warehouses} cartons={state.cartons} documents={state.documents} users={state.users} />
@@ -2537,6 +2674,7 @@ function AdminPanel({
   documents,
   audit,
   config,
+  appMode,
   canManage,
   onAddUser,
   onUpdateUser,
@@ -2561,6 +2699,7 @@ function AdminPanel({
   documents: DocumentRecord[];
   audit: AuditLog[];
   config: ManagementConfig;
+  appMode: AppMode;
   canManage: boolean;
   onAddUser: (form: FormData) => void;
   onUpdateUser: (id: string, form: FormData) => void;
@@ -2597,7 +2736,7 @@ function AdminPanel({
       <AdminLocationsPanel warehouses={warehouses} cartons={cartons} users={users} documents={documents} canManage={canManage} onAdd={onAddLocation} onUpdate={onUpdateLocation} onArchive={onArchiveLocation} />
       <AdminProductsPanel products={products} cartons={cartons} patterns={[]} canManage={canManage} onAdd={onAddProduct} onUpdate={onUpdateProduct} onArchive={onArchiveProduct} />
       <PermissionMatrix permissions={config.permissions} onToggle={onTogglePermission} />
-      <SystemSettingsPanel settings={config.settings} warehouses={warehouses} onSave={onSaveSettings} />
+      <SystemSettingsPanel settings={config.settings} appMode={appMode} warehouses={warehouses} onSave={onSaveSettings} />
       <MasterDataSuite config={config} canManage={canManage} onAdd={onAddMaster} onEdit={onEditMaster} onStatus={onStatusMaster} />
       <AdminSafetyPanel products={products} warehouses={warehouses} cartons={cartons} documents={documents} users={users} />
     </section>
@@ -2671,15 +2810,23 @@ function AdminLocationsPanel({ warehouses, cartons, users, documents, canManage,
   return (
     <Card title="Factory, Warehouse & Location Management" pad={false}>
       {canManage ? (
-        <form className="admin-create-form" onSubmit={(event) => { event.preventDefault(); onAdd(new FormData(event.currentTarget)); event.currentTarget.reset(); }}>
+        <form className="admin-create-form admin-create-form--wide" onSubmit={(event) => { event.preventDefault(); onAdd(new FormData(event.currentTarget)); event.currentTarget.reset(); }}>
           <TextField name="name" label="Location name" required />
-          <SelectField name="type" label="Location type"><option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">Transit</option><option value="damage-hold">Damage-hold</option><option value="virtual">Virtual</option></SelectField>
+          <TextField name="code" label="Code" required />
+          <SelectField name="type" label="Location type"><option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">In Transit</option><option value="damage-hold">Damage Hold</option><option value="customer-hold">Customer Hold</option><option value="virtual">Virtual</option></SelectField>
+          <TextField name="address" label="Address" />
+          <TextField name="city" label="City" />
+          <TextField name="state" label="State" />
+          <TextField name="contactPerson" label="Contact person" />
+          <TextField name="phone" label="Phone" />
+          <TextField name="email" label="Email" type="email" />
+          <SelectField name="active" label="Status"><option value="active">Active</option><option value="inactive">Inactive</option></SelectField>
           <Button type="submit" className="self-end"><MapPin size={18} /> Add location</Button>
         </form>
       ) : null}
       <div className="ds-table-wrap">
         <table className="ds-table min-w-[980px]">
-          <thead><tr><th>Name</th><th>Type</th><th>Cartons</th><th>Users</th><th>History</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Code</th><th>Type</th><th>City</th><th>Contact</th><th>Phone</th><th>Cartons</th><th>Users</th><th>History</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
             {warehouses.map((warehouse) => {
               const cartonCount = cartons.filter((carton) => carton.warehouseId === warehouse.id).length;
@@ -2690,17 +2837,29 @@ function AdminLocationsPanel({ warehouses, cartons, users, documents, canManage,
                   <td>
                     <form id={`loc-${warehouse.id}`} onSubmit={(event) => { event.preventDefault(); onUpdate(warehouse.id, new FormData(event.currentTarget)); }}>
                       <input className="admin-cell-input" name="name" defaultValue={warehouse.name} disabled={!canManage || warehouse.archived} />
+                      <input type="hidden" name="address" defaultValue={warehouse.address ?? ""} />
+                      <input type="hidden" name="state" defaultValue={warehouse.state ?? ""} />
+                      <input type="hidden" name="email" defaultValue={warehouse.email ?? ""} />
                     </form>
                   </td>
+                  <td><input form={`loc-${warehouse.id}`} className="admin-cell-input ds-mono" name="code" defaultValue={warehouse.code ?? warehouse.id} disabled={!canManage || warehouse.archived} /></td>
                   <td>
                     <select form={`loc-${warehouse.id}`} name="type" defaultValue={warehouse.type} className="admin-cell-input" disabled={!canManage || warehouse.archived}>
-                      <option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">Transit</option><option value="damage-hold">Damage-hold</option><option value="virtual">Virtual</option>
+                      <option value="factory">Factory</option><option value="warehouse">Warehouse</option><option value="transit">In Transit</option><option value="damage-hold">Damage Hold</option><option value="customer-hold">Customer Hold</option><option value="virtual">Virtual</option>
                     </select>
                   </td>
+                  <td><input form={`loc-${warehouse.id}`} className="admin-cell-input" name="city" defaultValue={warehouse.city ?? ""} disabled={!canManage || warehouse.archived} /></td>
+                  <td><input form={`loc-${warehouse.id}`} className="admin-cell-input" name="contactPerson" defaultValue={warehouse.contactPerson ?? ""} disabled={!canManage || warehouse.archived} /></td>
+                  <td><input form={`loc-${warehouse.id}`} className="admin-cell-input" name="phone" defaultValue={warehouse.phone ?? ""} disabled={!canManage || warehouse.archived} /></td>
                   <td className="ds-mono">{cartonCount}</td>
                   <td className="ds-mono">{userCount}</td>
                   <td className="ds-mono">{historyCount}</td>
-                  <td>{warehouse.archived ? <StatusBadge tone="slate">Archived</StatusBadge> : <StatusBadge tone="teal">Active</StatusBadge>}</td>
+                  <td>
+                    <select form={`loc-${warehouse.id}`} name="active" defaultValue={warehouse.active === false ? "inactive" : "active"} className="admin-cell-input" disabled={!canManage || warehouse.archived}>
+                      <option value="active">Active</option><option value="inactive">Inactive</option>
+                    </select>
+                    {warehouse.archived ? <StatusBadge tone="slate">Archived</StatusBadge> : null}
+                  </td>
                   <td>
                     <div className="admin-row-actions">
                       <Button size="sm" type="submit" form={`loc-${warehouse.id}`} disabled={!canManage || warehouse.archived}>Save</Button>
@@ -2771,6 +2930,93 @@ function AdminProductsPanel({ products, cartons, canManage, onAdd, onUpdate, onA
             ))}
           </tbody>
         </table>
+      </div>
+    </Card>
+  );
+}
+
+function StructuredMasterPanel({
+  title,
+  masterKey,
+  records,
+  fields,
+  preview,
+  canManage,
+  onAdd,
+  onUpdate,
+  onArchive,
+}: {
+  title: string;
+  masterKey: MasterKey;
+  records: MasterRecord[];
+  fields: Array<[string, string]>;
+  preview?: "barcode";
+  canManage: boolean;
+  onAdd: (masterKey: MasterKey, form: FormData) => void;
+  onUpdate: (masterKey: MasterKey, id: string, form: FormData) => void;
+  onArchive: (masterKey: MasterKey, id: string) => void;
+}) {
+  const previewBarcode = (record: MasterRecord) => {
+    const meta = record.metadata ?? {};
+    const template = meta.template || record.description || barcodeTemplate;
+    const values: Record<string, string> = {
+      PREFIX: meta.prefix || "MM",
+      GTIN: meta.gtin || "8908000000000",
+      BATCH: meta.batch || "B2606A",
+      WEIGHT: meta.weight || "70G",
+      QTY: meta.qty || "72",
+      QTY_UNIT: meta.qtyUnit || "pcs",
+      MRP: meta.mrp || "99",
+      VARIANT: meta.variant || "PP",
+      CARTON_NO: meta.cartonNo || "00001",
+    };
+    return template.replace(/\{([A-Z_]+)\}/g, (_, key: string) => values[key] ?? "");
+  };
+  return (
+    <Card title={title} pad={false}>
+      {canManage ? (
+        <form className="admin-create-form admin-create-form--wide" onSubmit={(event) => { event.preventDefault(); onAdd(masterKey, new FormData(event.currentTarget)); event.currentTarget.reset(); }}>
+          <TextField name="name" label="Name" required />
+          <TextField name="code" label="Code" required />
+          <TextField name="description" label="Description" />
+          {fields.map(([name, label]) => <TextField key={name} name={name} label={label} />)}
+          <Button type="submit" className="self-end">Create</Button>
+        </form>
+      ) : null}
+      <div className="ds-table-wrap">
+        <table className="ds-table min-w-[1100px]">
+          <thead>
+            <tr>
+              <th>Name</th><th>Code</th><th>Description</th>{fields.map(([, label]) => <th key={label}>{label}</th>)}{preview ? <th>Preview</th> : null}<th>Status</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {records.map((record) => (
+              <tr key={record.id}>
+                <td>
+                  <form id={`${masterKey}-${record.id}`} onSubmit={(event) => { event.preventDefault(); onUpdate(masterKey, record.id, new FormData(event.currentTarget)); }}>
+                    <input className="admin-cell-input" name="name" defaultValue={record.name} disabled={!canManage || record.archived} />
+                  </form>
+                </td>
+                <td><input form={`${masterKey}-${record.id}`} className="admin-cell-input ds-mono" name="code" defaultValue={record.code} disabled={!canManage || record.archived} /></td>
+                <td><input form={`${masterKey}-${record.id}`} className="admin-cell-input" name="description" defaultValue={record.description ?? ""} disabled={!canManage || record.archived} /></td>
+                {fields.map(([name]) => (
+                  <td key={name}><input form={`${masterKey}-${record.id}`} className="admin-cell-input" name={name} defaultValue={record.metadata?.[name] ?? ""} disabled={!canManage || record.archived} /></td>
+                ))}
+                {preview === "barcode" ? <td className="ds-mono">{previewBarcode(record)}</td> : null}
+                <td><StatusBadge tone={record.status === "Active" ? "teal" : record.status === "Inactive" ? "amber" : "slate"}>{record.status}</StatusBadge></td>
+                <td>
+                  <div className="admin-row-actions">
+                    <Button size="sm" type="submit" form={`${masterKey}-${record.id}`} disabled={!canManage || record.archived}>Save</Button>
+                    <Button size="sm" variant="secondary" disabled={!canManage || record.status === "Inactive"} onClick={() => onUpdate(masterKey, record.id, new FormData(document.getElementById(`${masterKey}-${record.id}`) as HTMLFormElement))}>Edit</Button>
+                    <Button size="sm" variant="danger" disabled={!canManage || record.archived} onClick={() => onArchive(masterKey, record.id)}>Archive</Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!records.length ? <EmptyState text="No records yet." /> : null}
       </div>
     </Card>
   );
@@ -2915,7 +3161,7 @@ function PermissionMatrix({ permissions, onToggle }: { permissions: PermissionGr
   );
 }
 
-function SystemSettingsPanel({ settings, warehouses, onSave }: { settings: ManagementSettings; warehouses: WarehouseRecord[]; onSave: (form: FormData) => void }) {
+function SystemSettingsPanel({ settings, appMode, warehouses, onSave }: { settings: ManagementSettings; appMode: AppMode; warehouses: WarehouseRecord[]; onSave: (form: FormData) => void }) {
   return (
     <Card title="Configurable System Settings">
       <form
@@ -2926,6 +3172,7 @@ function SystemSettingsPanel({ settings, warehouses, onSave }: { settings: Manag
         }}
       >
         <div className="grid gap-3 md:grid-cols-3">
+          <SelectField name="appMode" label="Development / Production mode" defaultValue={appMode}><option value="development">Development Mode</option><option value="production">Production Mode</option></SelectField>
           <SelectField name="defaultFactory" label="Default factory" defaultValue={settings.defaultFactory}>{warehouses.filter((item) => item.type === "factory").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</SelectField>
           <SelectField name="defaultWarehouse" label="Default warehouse" defaultValue={settings.defaultWarehouse}>{warehouses.filter((item) => item.type === "warehouse").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</SelectField>
           <SelectField name="stockRule" label="Stock issue rule" defaultValue={settings.stockRule}><option value="FEFO">FEFO</option><option value="FIFO">FIFO</option></SelectField>
@@ -2935,6 +3182,8 @@ function SystemSettingsPanel({ settings, warehouses, onSave }: { settings: Manag
           <TextField name="receivingPrefix" label="Receiving prefix" defaultValue={settings.documentPrefixes.receiving} />
           <TextField name="transferPrefix" label="Transfer prefix" defaultValue={settings.documentPrefixes.transfer} />
           <TextField name="batchPrefix" label="Batch prefix" defaultValue={settings.documentPrefixes.batch} />
+          <TextField name="requiredDispatchFields" label="Required dispatch fields" defaultValue={settings.requiredDispatchFields.join(", ")} />
+          <TextField name="requiredReceivingFields" label="Required receiving fields" defaultValue={settings.requiredReceivingFields.join(", ")} />
         </div>
         <TextField name="barcodeFormatDefault" label="Barcode format default" defaultValue={settings.barcodeFormatDefault} mono />
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
