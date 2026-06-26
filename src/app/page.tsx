@@ -211,6 +211,11 @@ type ScanSession = {
   driver?: string;
   lr?: string;
   transporter?: string;
+  batchNumbers?: string[];
+  mfdByBatch?: Record<string, string>;
+  movementDate?: string;
+  trackingNumber?: string;
+  carrier?: string;
   notes?: string;
   createdBy: string;
   createdAt: string;
@@ -351,6 +356,18 @@ function uid(...parts: string[]) {
 
 function generateBarcode(product: Product, batch: string, cartonNo: string) {
   return buildBarcodeFromTemplate(product, batch, cartonNo);
+}
+
+function isAvailableStatus(status: Status) {
+  return ["IN_FACTORY", "RECEIVED_AT_WAREHOUSE", "RECEIVED_AT_DESTINATION"].includes(status);
+}
+
+function isTransitStatus(status: Status) {
+  return status === "IN_TRANSIT" || status === "IN_TRANSIT_TRANSFER";
+}
+
+function isExceptionStatus(status: Status) {
+  return ["DAMAGED", "LOST", "BLOCKED", "EXPIRED", "UNDER_INVESTIGATION"].includes(status);
 }
 
 function normalizeSkuPart(value: string | number | undefined) {
@@ -681,10 +698,13 @@ export default function Home() {
 
   const metrics = useMemo(() => {
     const active = operationalCartons.filter((carton) => !["VOIDED", "REVERSED"].includes(carton.status));
+    const available = active.filter((carton) => isAvailableStatus(carton.status));
     return {
-      cartons: active.length,
-      units: active.reduce((sum, carton) => sum + carton.qty, 0),
-      inTransit: active.filter((carton) => carton.status.includes("IN_TRANSIT")).length,
+      cartons: available.length,
+      units: available.reduce((sum, carton) => sum + carton.qty, 0),
+      inTransit: active.filter((carton) => isTransitStatus(carton.status)).length,
+      customerDispatched: active.filter((carton) => carton.status === "DISPATCHED_TO_CUSTOMER").length,
+      exceptions: active.filter((carton) => isExceptionStatus(carton.status)).length,
       blocked: active.filter((carton) => lockedStatuses.includes(carton.status)).length,
       nearExpiry: active.filter((carton) => daysFrom(carton.expiry) <= 45 && daysFrom(carton.expiry) >= 0).length,
       missing: operationalMismatches.filter((item) => item.status !== "Closed").reduce((sum, item) => sum + item.missing.length, 0),
@@ -847,6 +867,12 @@ export default function Home() {
     if (!existingCarton) {
       const parsed = parseTemplateBarcode(barcode, operationalProducts);
       if (parsed?.product && session.type === "Factory Dispatch" && state.managementConfig.settings.autoRegisterCartonOnFirstScan) {
+        if (session.batchNumbers?.length && !session.batchNumbers.includes(String(parsed.batch))) {
+          setScanMessage({ type: "error", text: "Carton batch is not selected for this dispatch job." });
+          setScanInput("");
+          playScanTone("error");
+          return;
+        }
         const duplicateDraft = operationalSessions.find((item) => !item.finalized && item.id !== session.id && item.scanned.includes(barcode));
         if (duplicateDraft || session.scanned.includes(barcode)) {
           setScanMessage({ type: "error", text: "Duplicate scan blocked." });
@@ -973,7 +999,11 @@ export default function Home() {
 
   function finalizeSession() {
     if (!session || !user || session.scanned.length === 0) return;
-    const finalizeCheck = validateFinalizeRule(session, state.managementConfig.settings.requiredDispatchFields);
+    if (!can(user, "manage")) {
+      setScanMessage({ type: "error", text: "Only Admin, Accountant, or Warehouse Manager can finalize inventory movement." });
+      return;
+    }
+    const finalizeCheck = validateFinalizeRule(session, ["destinationWarehouseId"]);
     if (!finalizeCheck.ok) {
       setScanMessage({ type: "error", text: finalizeCheck.message });
       return;
@@ -1056,32 +1086,13 @@ export default function Home() {
         createdBy: user.id,
         source: warehouseById[session.sourceWarehouseId],
         destination: session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : session.customer,
-        vehicle: session.vehicle,
-        driver: session.driver,
-        lr: session.lr,
-        transporter: session.transporter,
-        notes: session.notes,
+        lr: session.trackingNumber,
+        transporter: session.carrier,
+        notes: [session.notes, session.batchNumbers?.length ? `Batches: ${session.batchNumbers.join(", ")}` : "", session.movementDate ? `Movement date: ${session.movementDate}` : ""].filter(Boolean).join(" | "),
         discrepancy: hasMismatch ? `Investigation required. Missing: ${missing.length}, Extra: ${extra.length}` : undefined,
         barcodes: session.scanned,
         dataOrigin: session.dataOrigin,
       });
-      if (session.type === "Factory Dispatch") {
-        draft.documents.unshift({
-          id: `VLS-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 1).padStart(3, "0")}`,
-          type: "Vehicle Loading Slip",
-          createdAt: now(),
-          createdBy: user.id,
-          source: warehouseById[session.sourceWarehouseId],
-          destination: session.destinationWarehouseId ? warehouseById[session.destinationWarehouseId] : undefined,
-          vehicle: session.vehicle,
-          driver: session.driver,
-          lr: session.lr,
-          transporter: session.transporter,
-          notes: session.notes,
-          barcodes: session.scanned,
-          dataOrigin: session.dataOrigin,
-        });
-      }
       if (session.type === "Customer Dispatch") {
         draft.documents.unshift({
           id: `DC-${new Date().toISOString().slice(2, 10).replaceAll("-", "")}-${String(draft.documents.length + 1).padStart(3, "0")}`,
@@ -1090,10 +1101,8 @@ export default function Home() {
           createdBy: user.id,
           source: warehouseById[session.sourceWarehouseId],
           destination: session.customer,
-          vehicle: session.vehicle,
-          driver: session.driver,
-          lr: session.lr,
-          transporter: session.transporter,
+          lr: session.trackingNumber,
+          transporter: session.carrier,
           notes: session.notes,
           barcodes: session.scanned,
           dataOrigin: session.dataOrigin,
@@ -2243,7 +2252,6 @@ export default function Home() {
 
         {view === "Inventory" ? (
           <InventoryWorkbench
-            cartons={visibleCartons}
             filteredCartons={inventoryFilteredCartons}
             rows={inventoryRows}
             warehouses={state.warehouses}
@@ -2270,6 +2278,7 @@ export default function Home() {
             documents={operationalDocuments}
             audit={state.audit}
             canReverse={hasPermission(state, user, "Inventory", "approve")}
+            canAdjustStock={can(user, "sensitive")}
             onSelectCarton={setSelectedCartonBarcode}
             onCloseDrawer={() => setSelectedCartonBarcode("")}
             onScan={() => (can(user, "sensitive") ? setView("Scan") : setScanMessage({ type: "error", text: "Stock Adjustment / Scan In is restricted to Admin and Accountant." }))}
@@ -2333,6 +2342,7 @@ export default function Home() {
             cameraOn={cameraOn}
             fullscreen={scanFullscreen}
             canScan={can(user, "scan")}
+            canFinalizeMovement={can(user, "manage")}
             cartons={operationalCartons}
             products={operationalProducts}
             warehouses={state.warehouses}
@@ -2697,7 +2707,7 @@ function RoleWorkspace({
   setView,
 }: {
   user: User;
-  metrics: { cartons: number; units: number; inTransit: number; blocked: number; nearExpiry: number; missing: number };
+  metrics: { cartons: number; units: number; inTransit: number; customerDispatched: number; exceptions: number; blocked: number; nearExpiry: number; missing: number };
   pendingApprovals: number;
   draftSessions: number;
   setView: (view: string) => void;
@@ -3393,7 +3403,6 @@ function WorkflowLanding({
 }
 
 function InventoryWorkbench({
-  cartons,
   filteredCartons,
   rows,
   warehouses,
@@ -3420,6 +3429,7 @@ function InventoryWorkbench({
   documents,
   audit,
   canReverse,
+  canAdjustStock,
   onSelectCarton,
   onCloseDrawer,
   onScan,
@@ -3428,13 +3438,12 @@ function InventoryWorkbench({
   onExport,
   onReverse,
 }: {
-  cartons: Carton[];
   filteredCartons: Carton[];
   rows: InventoryAggregateRow[];
   warehouses: WarehouseRecord[];
   warehouseById: Record<string, string>;
   productById: Record<string, Product>;
-  metrics: { cartons: number; units: number; inTransit: number; blocked: number; nearExpiry: number; missing: number };
+  metrics: { cartons: number; units: number; inTransit: number; customerDispatched: number; exceptions: number; blocked: number; nearExpiry: number; missing: number };
   pendingReceiptCartons: number;
   query: string;
   onQuery: (value: string) => void;
@@ -3455,6 +3464,7 @@ function InventoryWorkbench({
   documents: DocumentRecord[];
   audit: AuditLog[];
   canReverse: boolean;
+  canAdjustStock: boolean;
   onSelectCarton: (barcode: string) => void;
   onCloseDrawer: () => void;
   onScan: () => void;
@@ -3471,19 +3481,19 @@ function InventoryWorkbench({
           <p>Search by barcode, SKU, GTIN, product, or batch. Stock is calculated from actual carton records only.</p>
         </div>
         <div className="ops-toolbar__actions">
-          <Button variant="secondary" onClick={onScan}><QrCode size={18} /> Stock Adjustment</Button>
+          {canAdjustStock ? <Button variant="secondary" onClick={onScan}><QrCode size={18} /> Stock Adjustment</Button> : null}
           <Button variant="secondary" onClick={onCreateBatch}><Boxes size={18} /> Create Batch</Button>
           <Button variant="secondary" onClick={onPrintLabels}><Printer size={18} /> Print Labels</Button>
           <Button variant="accent" onClick={onExport}><Download size={18} /> Export Inventory</Button>
         </div>
       </div>
       <div className="ops-kpi-row ops-kpi-row--six">
-        <Stat label="Current cartons" value={cartons.filter((carton) => !lockedStatuses.includes(carton.status)).length} tone="accent" />
-        <Stat label="Current units" value={metrics.units} tone="brand" />
+        <Stat label="Available cartons" value={metrics.cartons} tone="accent" />
+        <Stat label="Available units" value={metrics.units} tone="brand" />
         <Stat label="In transit" value={metrics.inTransit} tone="warning" />
-        <Stat label="Pending receipts" value={pendingReceiptCartons} />
-        <Stat label="Shortages" value={metrics.missing} tone="danger" />
-        <Stat label="Near expiry" value={metrics.nearExpiry} tone="warning" />
+        <Stat label="Customer dispatched" value={metrics.customerDispatched} />
+        <Stat label="Damaged/Lost/Blocked" value={metrics.exceptions} tone="danger" />
+        <Stat label="Pending receipts" value={pendingReceiptCartons} tone="warning" />
       </div>
       <Card>
         <div className="ops-filter-grid">
@@ -3636,6 +3646,7 @@ function OperationalScanWorkspace({
   cameraOn,
   fullscreen,
   canScan,
+  canFinalizeMovement,
   cartons,
   products,
   warehouses,
@@ -3664,6 +3675,7 @@ function OperationalScanWorkspace({
   cameraOn: boolean;
   fullscreen: boolean;
   canScan: boolean;
+  canFinalizeMovement: boolean;
   cartons: Carton[];
   products: Product[];
   warehouses: WarehouseRecord[];
@@ -3718,7 +3730,7 @@ function OperationalScanWorkspace({
       <div className="ops-scan-main">
         {session ? (
           <>
-            <ScanRouteHeader session={session} warehouseById={warehouseById} onExportPacking={onExportPacking} onFinalize={onFinalize} onToggleFullscreen={onToggleFullscreen} canFinalize={finalizeCheck.ok && scanned.length > 0} fullscreen={fullscreen} />
+            <ScanRouteHeader session={session} warehouseById={warehouseById} onExportPacking={onExportPacking} onFinalize={onFinalize} onToggleFullscreen={onToggleFullscreen} canFinalize={canFinalizeMovement && finalizeCheck.ok && scanned.length > 0} fullscreen={fullscreen} />
             <ScanWizardSteps session={session} />
             <div className="ops-count-grid">
               <CounterCard label="Expected" value={expected.length ? expected.length : "Open"} />
@@ -3744,8 +3756,8 @@ function OperationalScanWorkspace({
                 onSaveDraft={onSaveDraft}
                 onFinalize={onFinalize}
                 onToggleCamera={onToggleCamera}
-                canFinalize={finalizeCheck.ok && scanned.length > 0}
-                finalizeMessage={finalizeCheck.message}
+                canFinalize={canFinalizeMovement && finalizeCheck.ok && scanned.length > 0}
+                finalizeMessage={canFinalizeMovement ? finalizeCheck.message : "Scan-only roles cannot finalize inventory movement."}
               />
               <ScanReviewPanel session={session} cartons={cartons} products={products} productById={productById} warehouseById={warehouseById} missing={missing} extra={extra} mismatches={mismatches} />
             </div>
@@ -3857,27 +3869,57 @@ function ScanEnginePanel({
   finalizeMessage: string;
 }) {
   const sourceOptions = session.type === "Warehouse Receive" ? sourceSessions.receiving : sourceSessions.transferIn;
+  const isInbound = session.type === "Warehouse Receive" || session.type === "Transfer In";
+  const isCustomerShipment = session.type === "Customer Dispatch";
+  const sourceChoices = session.type === "Factory Dispatch"
+    ? warehouses.filter((item) => item.type === "factory" || item.type === "warehouse")
+    : warehouses.filter((item) => item.type === "warehouse");
+  const destinationChoices = session.type === "Factory Dispatch" || session.type === "Transfer Out"
+    ? warehouses.filter((item) => item.type === "warehouse" && item.id !== session.sourceWarehouseId)
+    : warehouses.filter((item) => item.type === "warehouse");
+  const batchText = session.batchNumbers?.join(", ") ?? "";
+  const updateBatchNumbers = (value: string) => {
+    const batches = value.split(",").map((item) => item.trim()).filter(Boolean);
+    const mfdByBatch = batches.reduce<Record<string, string>>((acc, batch) => {
+      acc[batch] = session.mfdByBatch?.[batch] ?? session.movementDate ?? new Date().toISOString().slice(0, 10);
+      return acc;
+    }, {});
+    onSessionChange({ ...session, batchNumbers: batches, mfdByBatch, updatedAt: now() });
+  };
   return (
     <Card className="ops-scan-card">
       <div className="ops-card-title"><QrCode size={18} /> What am I scanning?</div>
-      <p className="ops-muted">{session.type.includes("Receive") || session.type === "Transfer In" ? "Scan received cartons from the selected incoming movement." : "Scan carton labels for this outbound movement. USB and Bluetooth scanners work as keyboard input."}</p>
-      {session.type === "Warehouse Receive" || session.type === "Transfer In" ? (
+      <p className="ops-muted">{isInbound ? "Scan received cartons from the selected incoming movement." : "Scan carton labels. Product, SKU, batch, quantity, status, and location are detected from the barcode."}</p>
+      {isInbound ? (
         <SelectField label="Incoming dispatch / transfer" value={session.sourceSessionId ?? ""} onChange={(event) => onSourceSessionChange(event.target.value)}>
           <option value="">Select incoming movement</option>
           {sourceOptions.map((item) => <option key={item.id} value={item.id}>{item.id} / {item.scanned.length} cartons</option>)}
         </SelectField>
       ) : null}
-      <div className="ops-form-grid">
-        <SelectField label="Destination / Warehouse" value={session.destinationWarehouseId ?? ""} onChange={(event) => onSessionChange({ ...session, destinationWarehouseId: event.target.value, updatedAt: now() })}>
-          <option value="">Customer / not applicable</option>
-          {warehouses.filter((item) => item.type === "warehouse").map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
-        </SelectField>
-        <TextField label="Customer" value={session.customer ?? ""} onChange={(event) => onSessionChange({ ...session, customer: event.target.value, updatedAt: now() })} />
-        <TextField label="Vehicle number" value={session.vehicle ?? ""} onChange={(event) => onSessionChange({ ...session, vehicle: event.target.value, updatedAt: now() })} />
-        <TextField label="Driver name" value={session.driver ?? ""} onChange={(event) => onSessionChange({ ...session, driver: event.target.value, updatedAt: now() })} />
-        <TextField label="LR / docket" value={session.lr ?? ""} onChange={(event) => onSessionChange({ ...session, lr: event.target.value, updatedAt: now() })} />
-        <TextField label="Transporter" value={session.transporter ?? ""} onChange={(event) => onSessionChange({ ...session, transporter: event.target.value, updatedAt: now() })} />
-      </div>
+      {!isInbound ? (
+        <div className="ops-form-grid">
+          <SelectField label={isCustomerShipment ? "Dispatching from" : "From source"} value={session.sourceWarehouseId} onChange={(event) => onSessionChange({ ...session, sourceWarehouseId: event.target.value, updatedAt: now() })}>
+            {sourceChoices.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+          </SelectField>
+          {isCustomerShipment ? (
+            <>
+              <TextField label="Customer" value={session.customer ?? ""} onChange={(event) => onSessionChange({ ...session, customer: event.target.value, updatedAt: now() })} />
+              <TextField label="Tracking number" value={session.trackingNumber ?? ""} onChange={(event) => onSessionChange({ ...session, trackingNumber: event.target.value, updatedAt: now() })} />
+              <TextField label="Carrier" value={session.carrier ?? ""} onChange={(event) => onSessionChange({ ...session, carrier: event.target.value, updatedAt: now() })} />
+            </>
+          ) : (
+            <>
+              <SelectField label="To destination" value={session.destinationWarehouseId ?? ""} onChange={(event) => onSessionChange({ ...session, destinationWarehouseId: event.target.value, updatedAt: now() })}>
+                <option value="">Select destination</option>
+                {destinationChoices.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+              </SelectField>
+              <TextField label="Batch number(s)" value={batchText} placeholder="G2627, ABC" onChange={(event) => updateBatchNumbers(event.target.value)} />
+              <TextField label={session.type === "Transfer Out" ? "Transfer date" : "Dispatch date"} type="date" value={session.movementDate ?? new Date().toISOString().slice(0, 10)} onChange={(event) => onSessionChange({ ...session, movementDate: event.target.value, updatedAt: now() })} />
+            </>
+          )}
+          <TextField label="Notes (optional)" value={session.notes ?? ""} onChange={(event) => onSessionChange({ ...session, notes: event.target.value, updatedAt: now() })} />
+        </div>
+      ) : null}
       <form
         className="ops-scan-form"
         onSubmit={(event) => {

@@ -156,6 +156,16 @@ test("receiving requires a selected dispatch and expected barcode membership", (
   assert.equal(valid.ok, true);
 });
 
+test("selected batch numbers are enforced by barcode scan validation", () => {
+  const item = carton({ batch: "B2606A" });
+  const blocked = validateScanRule(item.barcode, session({ batchNumbers: ["OTHER"] }), [item], [product], new Date("2026-06-24"));
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.message, /batch/);
+
+  const ok = validateScanRule(item.barcode, session({ batchNumbers: ["B2606A"] }), [item], [product], new Date("2026-06-24"));
+  assert.equal(ok.ok, true);
+});
+
 test("finalization requires operational fields", () => {
   assert.equal(validateFinalizeRule(session({ vehicle: "", scanned: ["b1"] }), ["vehicle", "driver", "destinationWarehouseId"]).ok, false);
   assert.equal(validateFinalizeRule(session({ scanned: ["b1"] })).ok, true);

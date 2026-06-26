@@ -63,6 +63,7 @@ export type WmsScanSession = {
   customer?: string;
   vehicle?: string;
   driver?: string;
+  batchNumbers?: string[];
   expected?: string[];
   sourceSessionId?: string;
   scanned: string[];
@@ -221,6 +222,7 @@ export function validateScanRule(
   }
   if (lockedStatuses.includes(carton.status)) return { ok: false, message: `Carton is ${carton.status}; scan blocked.` };
   if (daysFrom(carton.expiry, baseDate) < 0) return { ok: false, message: "Expired carton blocked." };
+  if (activeSession.batchNumbers?.length && !activeSession.batchNumbers.includes(carton.batch)) return { ok: false, message: "Carton batch is not selected for this job." };
   if (activeSession.expected?.length && !activeSession.expected.includes(barcode)) return { ok: false, message: "Carton is not part of the selected dispatch/transfer." };
   if (activeSession.type === "Factory Dispatch" && (carton.warehouseId !== activeSession.sourceWarehouseId || !availableStatuses.includes(carton.status))) {
     return { ok: false, message: "Wrong source location or carton is not available for dispatch." };

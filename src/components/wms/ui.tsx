@@ -131,12 +131,22 @@ const statusTone: Record<string, "teal" | "blue" | "amber" | "red" | "slate"> = 
   REVERSED: "red",
 };
 
+const statusLabel: Record<string, string> = {
+  IN_FACTORY: "AVAILABLE",
+  RECEIVED_AT_WAREHOUSE: "AVAILABLE",
+  RECEIVED_AT_DESTINATION: "AVAILABLE",
+  IN_TRANSIT: "IN TRANSIT",
+  IN_TRANSIT_TRANSFER: "IN TRANSIT",
+  DISPATCHED_TO_CUSTOMER: "CUSTOMER DISPATCHED",
+  UNDER_INVESTIGATION: "INVESTIGATION",
+};
+
 export function StatusBadge({ status, children, tone }: { status?: string; children?: ReactNode; tone?: "teal" | "blue" | "amber" | "red" | "slate" }) {
   const resolved = tone ?? (status ? statusTone[status] : undefined) ?? "slate";
   return (
     <span className={`mm-badge mm-badge--${resolved}`}>
       <span className="mm-badge__dot" />
-      {children ?? status}
+      {children ?? (status ? statusLabel[status] ?? status : status)}
     </span>
   );
 }

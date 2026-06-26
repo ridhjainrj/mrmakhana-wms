@@ -118,6 +118,34 @@ function warehouseNameToStableId(name: string) {
   return lower.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+function decodeSessionNotes(value: unknown) {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw.trim().startsWith("{")) return { notes: raw || undefined, workflow: {} as Record<string, unknown> };
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed.kind !== "wms-workflow-notes") return { notes: raw || undefined, workflow: {} as Record<string, unknown> };
+    return {
+      notes: typeof parsed.text === "string" && parsed.text ? parsed.text : undefined,
+      workflow: (parsed.workflow && typeof parsed.workflow === "object" ? parsed.workflow : {}) as Record<string, unknown>,
+    };
+  } catch {
+    return { notes: raw || undefined, workflow: {} as Record<string, unknown> };
+  }
+}
+
+function encodeSessionNotes(item: Record<string, unknown>) {
+  const workflow = {
+    batchNumbers: item.batchNumbers,
+    mfdByBatch: item.mfdByBatch,
+    movementDate: item.movementDate,
+    trackingNumber: item.trackingNumber,
+    carrier: item.carrier,
+  };
+  const hasWorkflow = Object.values(workflow).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
+  if (!hasWorkflow) return item.notes || null;
+  return JSON.stringify({ kind: "wms-workflow-notes", text: item.notes || "", workflow });
+}
+
 function dbToApp({
   settings,
   warehouses,
@@ -215,27 +243,35 @@ function dbToApp({
       dataOrigin: item.data_origin,
       archived: Boolean(item.archived),
     })),
-    sessions: sessions.map((item) => ({
-      id: String(item.id),
-      type: item.session_type,
-      sourceWarehouseId: warehouseAliasByDbId[String(item.source_warehouse_id)] ?? "factory",
-      destinationWarehouseId: item.destination_warehouse_id ? warehouseAliasByDbId[String(item.destination_warehouse_id)] : undefined,
-      sourceSessionId: item.source_session_id ? String(item.source_session_id) : undefined,
-      customer: item.customer ? String(item.customer) : undefined,
-      vehicle: item.vehicle_number ? String(item.vehicle_number) : undefined,
-      driver: item.driver_name ? String(item.driver_name) : undefined,
-      lr: item.lr_docket ? String(item.lr_docket) : undefined,
-      transporter: item.transporter ? String(item.transporter) : undefined,
-      notes: item.notes ? String(item.notes) : undefined,
-      createdBy: String(item.created_by),
-      createdAt: String(item.created_at),
-      updatedAt: String(item.updated_at),
-      scanned: Array.isArray(item.scanned_barcodes) ? item.scanned_barcodes : [],
-      expected: Array.isArray(item.expected_barcodes) ? item.expected_barcodes : [],
-      finalized: Boolean(item.finalized),
-      dataOrigin: item.data_origin,
-      archived: Boolean(item.archived),
-    })),
+    sessions: sessions.map((item) => {
+      const decodedNotes = decodeSessionNotes(item.notes);
+      return {
+        id: String(item.id),
+        type: item.session_type,
+        sourceWarehouseId: warehouseAliasByDbId[String(item.source_warehouse_id)] ?? "factory",
+        destinationWarehouseId: item.destination_warehouse_id ? warehouseAliasByDbId[String(item.destination_warehouse_id)] : undefined,
+        sourceSessionId: item.source_session_id ? String(item.source_session_id) : undefined,
+        customer: item.customer ? String(item.customer) : undefined,
+        vehicle: item.vehicle_number ? String(item.vehicle_number) : undefined,
+        driver: item.driver_name ? String(item.driver_name) : undefined,
+        lr: item.lr_docket ? String(item.lr_docket) : undefined,
+        transporter: item.transporter ? String(item.transporter) : undefined,
+        notes: decodedNotes.notes,
+        batchNumbers: Array.isArray(decodedNotes.workflow.batchNumbers) ? decodedNotes.workflow.batchNumbers : [],
+        mfdByBatch: decodedNotes.workflow.mfdByBatch && typeof decodedNotes.workflow.mfdByBatch === "object" ? decodedNotes.workflow.mfdByBatch : {},
+        movementDate: typeof decodedNotes.workflow.movementDate === "string" ? decodedNotes.workflow.movementDate : undefined,
+        trackingNumber: typeof decodedNotes.workflow.trackingNumber === "string" ? decodedNotes.workflow.trackingNumber : undefined,
+        carrier: typeof decodedNotes.workflow.carrier === "string" ? decodedNotes.workflow.carrier : undefined,
+        createdBy: String(item.created_by),
+        createdAt: String(item.created_at),
+        updatedAt: String(item.updated_at),
+        scanned: Array.isArray(item.scanned_barcodes) ? item.scanned_barcodes : [],
+        expected: Array.isArray(item.expected_barcodes) ? item.expected_barcodes : [],
+        finalized: Boolean(item.finalized),
+        dataOrigin: item.data_origin,
+        archived: Boolean(item.archived),
+      };
+    }),
     documents: documents.map((item) => ({
       id: String(item.id),
       type: String(item.document_type),
@@ -374,7 +410,7 @@ function appToDb(state: Record<string, unknown>) {
       driver_name: item.driver || null,
       lr_docket: item.lr || null,
       transporter: item.transporter || null,
-      notes: item.notes || null,
+      notes: encodeSessionNotes(item),
       expected_barcodes: item.expected ?? [],
       scanned_barcodes: item.scanned ?? [],
       finalized: Boolean(item.finalized),
@@ -477,6 +513,9 @@ export async function POST(request: Request) {
     const state = (await request.json()) as Record<string, unknown>;
     const role = request.headers.get("x-wms-role") ?? "";
     const currentState = await loadCurrentAppState();
+    if (role === "Viewer" && stableStringify(state) !== stableStringify(currentState)) {
+      return NextResponse.json({ error: "Viewer role is read-only." }, { status: 403 });
+    }
     if (hasAdminManagedChanges(state, currentState) && role !== "Admin") {
       return NextResponse.json({ error: "Admin role required for users, roles, locations, products, barcode templates, permissions, and settings." }, { status: 403 });
     }
