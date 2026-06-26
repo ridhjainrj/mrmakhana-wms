@@ -2085,7 +2085,7 @@ export default function Home() {
       <aside className="os-sidebar">
         <div className="os-brand">
           <span className="os-brand__mark">
-            <Image src="/logo-makhana-white.png" alt="" width={96} height={36} className="h-7 w-auto" />
+            <PackageCheck size={22} />
           </span>
           <div className="min-w-0">
             <div className="os-brand__title">Mr Makhana</div>
@@ -4251,9 +4251,9 @@ function CartonRow({ carton, warehouse, product, canReverse = false, onReverse }
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate font-mono text-xs font-bold text-[var(--text-strong)]">...{carton.barcode.slice(-14)}</div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm font-bold">
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-sm font-bold">
             <Tag mono>{carton.sku}</Tag>
-            <span>{product?.flavour ?? carton.flavour}</span>
+            <span className="text-safe-wrap">{product?.flavour ?? carton.flavour}</span>
             <Tag mono>{carton.cartonNo}</Tag>
           </div>
           <div className="mt-2 text-xs text-[var(--text-muted)]">{warehouse} / Batch {carton.batch} / Exp {carton.expiry}</div>
@@ -4362,10 +4362,10 @@ function ProductsPanel({
             const damagedLost = productCartons.filter((carton) => ["DAMAGED", "LOST"].includes(carton.status)).length;
             const pattern = patterns.find((item) => item.sku === product.sku);
             return (
-            <div key={product.id} className="rounded-xl border border-[var(--border-subtle)] bg-white p-3 shadow-[var(--shadow-xs)]">
-                <div className="flex flex-wrap items-center gap-2 font-bold text-[var(--text-strong)]"><Tag mono>{product.sku}</Tag><span>{product.flavour}</span></div>
+            <div key={product.id} className="product-master-card rounded-xl border border-[var(--border-subtle)] bg-white p-3 shadow-[var(--shadow-xs)]">
+                <div className="product-master-card__identity flex flex-wrap items-center gap-2 font-bold text-[var(--text-strong)]"><Tag mono>{product.sku}</Tag><span className="product-master-card__name">{product.flavour}</span></div>
                 <div className="mt-2 text-sm text-[var(--text-muted)]">{product.caseQty}{product.qtyUnit} / MRP {product.mrp}</div>
-                <div className="mt-2 font-mono text-xs text-[var(--text-muted)]">{pattern?.exampleBarcode ?? generateBarcode(product, "BATCH1", "00001")}</div>
+                <div className="mt-2 font-mono text-xs text-[var(--text-muted)] text-safe-wrap">{pattern?.exampleBarcode ?? generateBarcode(product, "BATCH1", "00001")}</div>
                 <div className="mt-3 grid gap-2 sm:grid-cols-3">
                   <Stat label="Valid range" value="00001-99999" />
                   <Stat label="Actual cartons" value={productCartons.length} tone="emerald" />
