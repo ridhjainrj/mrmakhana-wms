@@ -3366,23 +3366,26 @@ function WorkflowLanding({
 }) {
   return (
     <section className="ops-page">
-      <div className={`ops-hero ops-hero--${tone}`}>
-        <div className="ops-hero__icon">{icon}</div>
-        <div>
-          <h2>{title}</h2>
-          <p>{subtitle}</p>
+      <div className={`ops-job-console ops-job-console--${tone}`}>
+        <div className="ops-job-console__main">
+          <div className="ops-hero__icon">{icon}</div>
+          <div>
+            <div className="ds-eyebrow">Create Job {">"} Scan Cartons {">"} Finalize</div>
+            <h2>{title}</h2>
+            <p>{subtitle}</p>
+          </div>
         </div>
-        <div className="ops-hero__actions">
-          {secondaryLabel && onSecondary ? <Button variant="secondary" onClick={onSecondary}>{secondaryLabel}</Button> : null}
-          <Button variant="accent" onClick={onPrimary}>{primaryLabel}</Button>
+        <div className="ops-job-console__actions">
+          <Button variant="accent" size="lg" onClick={onPrimary}>{primaryLabel}</Button>
+          {secondaryLabel && onSecondary ? <Button variant="secondary" size="lg" onClick={onSecondary}>{secondaryLabel}</Button> : null}
         </div>
       </div>
       <div className="ops-kpi-row">
         {stats.map(([label, value]) => <Stat key={label} label={label} value={value} />)}
       </div>
-      <div className="ops-split">
-        <Card title="Workflow steps">
-          <div className="ops-step-list">
+      <div className="ops-workflow-board">
+        <Card title="Operator workflow">
+          <div className="ops-step-list ops-step-list--horizontal">
             {steps.map((step, index) => (
               <div className="ops-step" key={step}>
                 <span>{index + 1}</span>
@@ -3391,9 +3394,9 @@ function WorkflowLanding({
             ))}
           </div>
         </Card>
-        <Card title="Recent documents">
+        <Card title="Generated slips">
           <div className="ds-doc-grid">
-            {documents.slice(0, 8).map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={onReprint} />)}
+            {documents.slice(0, 4).map((doc) => <DocumentCard key={doc.id} doc={doc} onReprint={onReprint} />)}
             {!documents.length ? <EmptyState text="No workflow documents yet." /> : null}
           </div>
         </Card>
@@ -3706,12 +3709,16 @@ function OperationalScanWorkspace({
   const remaining = expected.length ? missing.length : 0;
   const progress = expected.length ? Math.min(100, (scanned.length / expected.length) * 100) : scanned.length ? 100 : 0;
   const finalizeCheck = session ? validateFinalizeRule(session, ["destinationWarehouseId"]) : { ok: false, message: "Start a workflow first." };
-  const shellClass = fullscreen ? "ops-scan-shell ops-scan-shell--fullscreen" : "ops-scan-shell";
+  const shellClass = [
+    "ops-scan-shell",
+    session ? "ops-scan-shell--active" : "",
+    fullscreen ? "ops-scan-shell--fullscreen" : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <section className={shellClass}>
       <aside className="ops-workflow-rail">
-        <div className="ops-workflow-rail__title">Start workflow</div>
+        <div className="ops-workflow-rail__title">Workflow Jobs</div>
         <button className="ops-flow-button ops-flow-button--orange" onClick={() => onStart("Factory Dispatch")} disabled={!canScan}><Truck size={22} /> Factory Dispatch</button>
         <button className="ops-flow-button ops-flow-button--green" onClick={() => onStart("Warehouse Receive")} disabled={!canScan}><PackageCheck size={22} /> Warehouse Receive</button>
         <button className="ops-flow-button ops-flow-button--blue" onClick={() => onStart("Transfer Out")} disabled={!canScan}><ArrowRightLeft size={22} /> Transfer Out</button>
@@ -3766,7 +3773,7 @@ function OperationalScanWorkspace({
           <div className="ops-empty-scan">
             <QrCode size={42} />
             <h2>Select a workflow to begin scanning</h2>
-            <p>Every movement remains a draft until finalized. Page refreshes keep finalized operational data in Supabase.</p>
+            <p>Create a job, scan cartons, then finalize. Inventory moves automatically from carton status and location.</p>
             <div className="ops-mobile-start">
               <button className="ops-flow-button ops-flow-button--orange" onClick={() => onStart("Factory Dispatch")} disabled={!canScan}><Truck size={22} /> Factory Dispatch</button>
               <button className="ops-flow-button ops-flow-button--green" onClick={() => onStart("Warehouse Receive")} disabled={!canScan}><PackageCheck size={22} /> Warehouse Receive</button>
@@ -3787,6 +3794,7 @@ function ScanRouteHeader({ session, warehouseById, onExportPacking, onFinalize, 
     <div className="ops-route-card">
       <div className="ops-route-card__icon"><Truck size={26} /></div>
       <div>
+        <div className="ds-eyebrow">Active job</div>
         <h2>{session.id}</h2>
         <div className="ops-route-meta">
           <Tag mono>{session.type}</Tag>
@@ -3888,7 +3896,7 @@ function ScanEnginePanel({
   };
   return (
     <Card className="ops-scan-card">
-      <div className="ops-card-title"><QrCode size={18} /> What am I scanning?</div>
+      <div className="ops-card-title"><QrCode size={18} /> Setup & Scan</div>
       <p className="ops-muted">{isInbound ? "Scan received cartons from the selected incoming movement." : "Scan carton labels. Product, SKU, batch, quantity, status, and location are detected from the barcode."}</p>
       {isInbound ? (
         <SelectField label="Incoming dispatch / transfer" value={session.sourceSessionId ?? ""} onChange={(event) => onSourceSessionChange(event.target.value)}>
@@ -3897,9 +3905,9 @@ function ScanEnginePanel({
         </SelectField>
       ) : null}
       {!isInbound ? (
-        <div className="ops-form-grid">
+        <div className="ops-form-grid ops-form-grid--operator">
           <SelectField label={isCustomerShipment ? "Dispatching from" : "From source"} value={session.sourceWarehouseId} onChange={(event) => onSessionChange({ ...session, sourceWarehouseId: event.target.value, updatedAt: now() })}>
-            {sourceChoices.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+            {sourceChoices.sort((a, b) => Number(b.type === "factory") - Number(a.type === "factory") || a.name.localeCompare(b.name)).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
           </SelectField>
           {isCustomerShipment ? (
             <>
@@ -3913,7 +3921,7 @@ function ScanEnginePanel({
                 <option value="">Select destination</option>
                 {destinationChoices.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
               </SelectField>
-              <TextField label="Batch number(s)" value={batchText} placeholder="G2627, ABC" onChange={(event) => updateBatchNumbers(event.target.value)} />
+              <TextField label="Batch number(s)" value={batchText} placeholder="Optional: G2627, ABC" onChange={(event) => updateBatchNumbers(event.target.value)} />
               <TextField label={session.type === "Transfer Out" ? "Transfer date" : "Dispatch date"} type="date" value={session.movementDate ?? new Date().toISOString().slice(0, 10)} onChange={(event) => onSessionChange({ ...session, movementDate: event.target.value, updatedAt: now() })} />
             </>
           )}
@@ -3931,7 +3939,7 @@ function ScanEnginePanel({
           <span className="mm-field__label">Large scanner input</span>
           <input ref={scanRef} value={scanInput} onChange={(event) => onScanInput(event.target.value)} className="mm-input mm-input--mono ops-scan-input" placeholder="Scan barcode - press Enter" autoComplete="off" />
         </label>
-        <Button variant="accent" size="lg" onClick={() => onScan(scanInput)}><QrCode size={20} /> Scan</Button>
+        <Button variant="accent" size="lg" onClick={() => onScan(scanInput)}><QrCode size={20} /> Accept Scan</Button>
       </form>
       {scanMessage ? <div className={`ops-scan-feedback ops-scan-feedback--${scanMessage.type}`}>{scanMessage.type === "ok" ? "Accepted" : "Review"}: {scanMessage.text}</div> : null}
       {cameraOn ? <CameraScanner onScan={onScan} /> : null}

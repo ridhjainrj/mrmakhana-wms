@@ -56,11 +56,11 @@
   --border-strong: var(--slate-300);
   --border-focus: var(--blue-500);
   --ring-focus: var(--blue-100);
-  --action-bg: var(--blue-500);
-  --action-bg-hover: var(--blue-600);
-  --accent: var(--teal-500);
-  --accent-strong: var(--teal-600);
-  --accent-soft: var(--teal-50);
+  --action-bg: #f97316;
+  --action-bg-hover: #ea580c;
+  --accent: #f97316;
+  --accent-strong: #ea580c;
+  --accent-soft: #fff7ed;
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", "Roboto Mono", monospace;
   --fs-display: 40px;
@@ -883,9 +883,7 @@ input[type="file"]::file-selector-button {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 292px minmax(0, 1fr);
-  background:
-    radial-gradient(circle at 72% -10%, rgba(47, 107, 255, 0.10), transparent 34rem),
-    var(--slate-50);
+  background: #f3f6fb;
   color: var(--text-strong);
 }
 
@@ -1078,9 +1076,9 @@ input[type="file"]::file-selector-button {
 }
 
 .os-content {
-  max-width: 1400px;
+  max-width: 1500px;
   margin: 0 auto;
-  padding: 28px 34px 44px;
+  padding: 24px 34px 44px;
 }
 
 .os-kpi-grid {
@@ -1156,7 +1154,8 @@ input[type="file"]::file-selector-button {
 
 .ops-toolbar,
 .ops-hero,
-.ops-route-card {
+.ops-route-card,
+.ops-job-console {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1170,6 +1169,7 @@ input[type="file"]::file-selector-button {
 
 .ops-toolbar h2,
 .ops-hero h2,
+.ops-job-console h2,
 .ops-route-card h2,
 .ops-drawer__head h2,
 .ops-empty-scan h2 {
@@ -1182,6 +1182,7 @@ input[type="file"]::file-selector-button {
 
 .ops-toolbar p,
 .ops-hero p,
+.ops-job-console p,
 .ops-muted,
 .ops-empty-scan p {
   margin: 6px 0 0;
@@ -1192,11 +1193,44 @@ input[type="file"]::file-selector-button {
 
 .ops-toolbar__actions,
 .ops-hero__actions,
+.ops-job-console__actions,
 .ops-route-card__actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.ops-job-console {
+  min-height: 132px;
+  align-items: stretch;
+  padding: 0;
+}
+
+.ops-job-console__main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+}
+
+.ops-job-console__actions {
+  min-width: 290px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  border-left: 1px solid var(--border-subtle);
+  background: #fffaf5;
+  padding: 22px;
+}
+
+.ops-job-console--orange .ops-hero__icon,
+.ops-job-console--purple .ops-hero__icon,
+.ops-job-console--blue .ops-hero__icon,
+.ops-job-console--green .ops-hero__icon {
+  background: #fff7ed;
+  color: #f97316;
 }
 
 .ops-hero {
@@ -1247,9 +1281,20 @@ input[type="file"]::file-selector-button {
   align-items: start;
 }
 
+.ops-workflow-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 0.42fr);
+  gap: 18px;
+  align-items: start;
+}
+
 .ops-step-list {
   display: grid;
   gap: 12px;
+}
+
+.ops-step-list--horizontal {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .ops-step {
@@ -1261,6 +1306,11 @@ input[type="file"]::file-selector-button {
   border-radius: 14px;
   background: var(--slate-25);
   padding: 12px;
+}
+
+.ops-step-list--horizontal .ops-step {
+  min-height: 78px;
+  align-items: start;
 }
 
 .ops-step span,
@@ -1398,8 +1448,12 @@ input[type="file"]::file-selector-button {
 
 .ops-scan-shell {
   display: grid;
-  grid-template-columns: 290px minmax(0, 1fr);
-  gap: 24px;
+  grid-template-columns: 270px minmax(0, 1fr);
+  gap: 18px;
+}
+
+.ops-scan-shell--active {
+  grid-template-columns: 230px minmax(0, 1fr);
 }
 
 .ops-scan-shell--fullscreen {
@@ -1424,6 +1478,10 @@ input[type="file"]::file-selector-button {
   box-shadow: var(--shadow-md);
 }
 
+.ops-scan-shell--active .ops-workflow-rail {
+  padding: 12px;
+}
+
 .ops-workflow-rail__title,
 .ops-drafts > strong,
 .ops-card-title {
@@ -1441,7 +1499,7 @@ input[type="file"]::file-selector-button {
 }
 
 .ops-flow-button {
-  min-height: 58px;
+  min-height: 54px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1451,6 +1509,12 @@ input[type="file"]::file-selector-button {
   color: #fff;
   font-weight: 850;
   text-align: left;
+}
+
+.ops-scan-shell--active .ops-flow-button {
+  min-height: 46px;
+  border-radius: 12px;
+  font-size: 13px;
 }
 
 .ops-flow-button--orange { background: linear-gradient(135deg, #f59e0b, #f97316); }
@@ -1487,7 +1551,9 @@ input[type="file"]::file-selector-button {
 }
 
 .ops-route-card {
-  align-items: flex-start;
+  align-items: center;
+  border-left: 6px solid #f97316;
+  padding: 18px 20px;
 }
 
 .ops-route-meta {
@@ -1503,11 +1569,11 @@ input[type="file"]::file-selector-button {
 .ops-wizard {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .ops-wizard__step {
-  min-height: 64px;
+  min-height: 52px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1533,11 +1599,15 @@ input[type="file"]::file-selector-button {
   gap: 12px;
 }
 
+.ops-count-grid {
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+}
+
 .ops-counter {
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   background: #fff;
-  padding: 14px 16px;
+  padding: 12px 16px;
 }
 
 .ops-counter span {
@@ -1553,7 +1623,7 @@ input[type="file"]::file-selector-button {
   margin-top: 5px;
   color: var(--text-strong);
   font-family: var(--font-mono);
-  font-size: 30px;
+  font-size: 34px;
   line-height: 1;
 }
 
@@ -1579,6 +1649,8 @@ input[type="file"]::file-selector-button {
 
 .ops-scan-card {
   overflow: visible;
+  border-color: #fed7aa;
+  box-shadow: 0 16px 34px rgba(249, 115, 22, 0.08), var(--shadow-sm);
 }
 
 .ops-form-grid {
@@ -1588,19 +1660,23 @@ input[type="file"]::file-selector-button {
   margin-top: 16px;
 }
 
+.ops-form-grid--operator {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .ops-scan-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  margin-top: 18px;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 12px;
+  margin-top: 20px;
 }
 
 .ops-scan-input {
-  min-height: 72px;
+  min-height: 82px;
   border-width: 2px;
   border-color: #f97316;
   background: #fffaf5;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 800;
 }
 
@@ -1628,6 +1704,10 @@ input[type="file"]::file-selector-button {
   margin-top: 14px;
 }
 
+.ops-scan-actions .mm-btn {
+  min-height: 38px;
+}
+
 .ops-finalize-note {
   margin-top: 12px;
   color: var(--text-muted);
@@ -1640,6 +1720,11 @@ input[type="file"]::file-selector-button {
   bottom: 16px;
   z-index: 5;
   margin-top: 16px;
+}
+
+.ops-sticky-finalize .mm-btn {
+  min-height: 58px;
+  font-size: 17px;
 }
 
 .ops-review-stack {
